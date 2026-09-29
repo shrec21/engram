@@ -1,0 +1,151 @@
+syntax = "proto3";
+
+package engram.v1;
+
+option go_package = "github.com/shrec21/engram/proto/engrampb";
+
+import "google/protobuf/timestamp.proto";
+
+// ── Data Model ──
+
+message MemoryRecord {
+  string namespace = 1;
+  string key = 2;
+  bytes value = 3;
+  uint64 version = 4;
+  string created_by = 5;
+  string source = 6;
+  float confidence = 7;
+  google.protobuf.Timestamp created_at = 8;
+  google.protobuf.Timestamp updated_at = 9;
+  google.protobuf.Timestamp expires_at = 10;
+  google.protobuf.Timestamp last_accessed_at = 11;
+  uint64 access_count = 12;
+}
+
+// ── Deterministic Apply Interface ──
+// Command is serialized into the Raft log in Week 2.
+// Timestamps are assigned BEFORE Apply and carried in the command.
+
+message Command {
+  google.protobuf.Timestamp timestamp = 1;
+  oneof payload {
+    PutCommand put = 2;
+    CompareAndSetCommand compare_and_set = 3;
+    DeleteCommand delete = 4;
+  }
+}
+
+message PutCommand {
+  string namespace = 1;
+  string key = 2;
+  bytes value = 3;
+  string created_by = 4;
+  string source = 5;
+  float confidence = 6;
+  google.protobuf.Timestamp expires_at = 7;
+}
+
+message CompareAndSetCommand {
+  string namespace = 1;
+  string key = 2;
+  bytes value = 3;
+  uint64 expected_version = 4;
+  string created_by = 5;
+  string source = 6;
+  float confidence = 7;
+  google.protobuf.Timestamp expires_at = 8;
+}
+
+message DeleteCommand {
+  string namespace = 1;
+  string key = 2;
+  uint64 expected_version = 3; // 0 = unconditional
+}
+
+// Apply returns this. Not in the Raft log, just the response.
+message CommandResult {
+  oneof result {
+    MutationResult mutation = 1;
+    DeleteResult delete_result = 2;
+    CASConflict cas_conflict = 3;
+  }
+}
+
+message MutationResult {
+  uint64 version = 1;
+}
+
+message DeleteResult {}
+
+message CASConflict {
+  uint64 current_version = 1;
+}
+
+// ── gRPC Service ──
+
+message PutRequest {
+  string namespace = 1;
+  string key = 2;
+  bytes value = 3;
+  string created_by = 4;
+  string source = 5;
+  float confidence = 6;
+  google.protobuf.Timestamp expires_at = 7;
+}
+
+message PutResponse {
+  uint64 version = 1;
+}
+
+message GetRequest {
+  string namespace = 1;
+  string key = 2;
+}
+
+message GetResponse {
+  MemoryRecord record = 1;
+}
+
+message CompareAndSetRequest {
+  string namespace = 1;
+  string key = 2;
+  bytes value = 3;
+  uint64 expected_version = 4;
+  string created_by = 5;
+  string source = 6;
+  float confidence = 7;
+  google.protobuf.Timestamp expires_at = 8;
+}
+
+message CompareAndSetResponse {
+  uint64 version = 1;
+}
+
+message DeleteRequest {
+  string namespace = 1;
+  string key = 2;
+  uint64 expected_version = 3;
+}
+
+message DeleteResponse {}
+
+message ListRequest {
+  string namespace = 1;
+  string key_prefix = 2;
+  int32 limit = 3;
+  string page_token = 4; // opaque; encodes last key seen
+}
+
+message ListResponse {
+  repeated MemoryRecord records = 1;
+  string next_page_token = 2;
+}
+
+service MemoryService {
+  rpc Put(PutRequest) returns (PutResponse);
+  rpc Get(GetRequest) returns (GetResponse);
+  rpc CompareAndSet(CompareAndSetRequest) returns (CompareAndSetResponse);
+  rpc Delete(DeleteRequest) returns (DeleteResponse);
+  rpc List(ListRequest) returns (ListResponse);
+}
