@@ -8,6 +8,8 @@ import (
 	"os"
 	"time"
 
+	mcpserver "github.com/mark3labs/mcp-go/server"
+	engrammcp "github.com/shrec21/engram/mcp"
 	pb "github.com/shrec21/engram/proto/engrampb"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -46,6 +48,8 @@ func main() {
 		cmdDelete(ctx, client, os.Args[2:])
 	case "list":
 		cmdList(ctx, client, os.Args[2:])
+	case "mcp":
+		cmdMCP(client)
 	default:
 		usage()
 		os.Exit(1)
@@ -195,6 +199,14 @@ func cmdList(ctx context.Context, client pb.MemoryServiceClient, args []string) 
 	}
 }
 
+func cmdMCP(client pb.MemoryServiceClient) {
+	srv := engrammcp.NewServer(client)
+	stdio := mcpserver.NewStdioServer(srv)
+	if err := stdio.Listen(context.Background(), os.Stdin, os.Stdout); err != nil {
+		fatal(err)
+	}
+}
+
 func printJSON(v interface{}) {
 	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
@@ -212,6 +224,7 @@ Usage:
   engramctl cas    <namespace> <key> <value> --version N [--created-by X] [--source X] [--confidence N] [--ttl D]
   engramctl delete <namespace> <key> [--version N]
   engramctl list   <namespace> [--prefix X] [--limit N]
+  engramctl mcp    (start MCP stdio server)
 
 Environment:
   ENGRAM_ADDR  gRPC server address (default: localhost:50051)
