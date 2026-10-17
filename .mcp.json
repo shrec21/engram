@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "engram": {
+      "command": "go",
+      "args": ["run", "./cmd/engramctl", "mcp"],
+      "env": {
+        "ENGRAM_ADDR": "localhost:50051"
+      }
+    }
+  }
+}
