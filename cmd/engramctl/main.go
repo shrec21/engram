@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	mcpserver "github.com/mark3labs/mcp-go/server"
@@ -62,10 +63,10 @@ func cmdPut(ctx context.Context, client pb.MemoryServiceClient, args []string) {
 	source := fs.String("source", "", "provenance")
 	confidence := fs.Float64("confidence", 1.0, "confidence score 0-1")
 	ttl := fs.Duration("ttl", 0, "time-to-live (e.g. 5m, 1h)")
-	fs.Parse(args)
+	fs.Parse(reorderArgs(args, fs))
 
 	if fs.NArg() < 3 {
-		fmt.Fprintf(os.Stderr, "usage: engramctl put <namespace> <key> <value> [flags]\n")
+		fmt.Fprintf(os.Stderr, "usage: engramctl put <namespace> <key> <value> [--created-by X] [--source X] [--confidence N] [--ttl D]\n")
 		os.Exit(1)
 	}
 
@@ -91,7 +92,7 @@ func cmdPut(ctx context.Context, client pb.MemoryServiceClient, args []string) {
 
 func cmdGet(ctx context.Context, client pb.MemoryServiceClient, args []string) {
 	fs := flag.NewFlagSet("get", flag.ExitOnError)
-	fs.Parse(args)
+	fs.Parse(reorderArgs(args, fs))
 
 	if fs.NArg() < 2 {
 		fmt.Fprintf(os.Stderr, "usage: engramctl get <namespace> <key>\n")
@@ -116,7 +117,7 @@ func cmdCAS(ctx context.Context, client pb.MemoryServiceClient, args []string) {
 	source := fs.String("source", "", "provenance")
 	confidence := fs.Float64("confidence", 1.0, "confidence score 0-1")
 	ttl := fs.Duration("ttl", 0, "time-to-live")
-	fs.Parse(args)
+	fs.Parse(reorderArgs(args, fs))
 
 	if fs.NArg() < 3 {
 		fmt.Fprintf(os.Stderr, "usage: engramctl cas <namespace> <key> <value> --version N [flags]\n")
@@ -147,7 +148,7 @@ func cmdCAS(ctx context.Context, client pb.MemoryServiceClient, args []string) {
 func cmdDelete(ctx context.Context, client pb.MemoryServiceClient, args []string) {
 	fs := flag.NewFlagSet("delete", flag.ExitOnError)
 	version := fs.Uint64("version", 0, "expected version (0 = unconditional)")
-	fs.Parse(args)
+	fs.Parse(reorderArgs(args, fs))
 
 	if fs.NArg() < 2 {
 		fmt.Fprintf(os.Stderr, "usage: engramctl delete <namespace> <key> [--version N]\n")
@@ -169,7 +170,7 @@ func cmdList(ctx context.Context, client pb.MemoryServiceClient, args []string) 
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
 	prefix := fs.String("prefix", "", "key prefix filter")
 	limit := fs.Int("limit", 100, "max records per page")
-	fs.Parse(args)
+	fs.Parse(reorderArgs(args, fs))
 
 	if fs.NArg() < 1 {
 		fmt.Fprintf(os.Stderr, "usage: engramctl list <namespace> [--prefix X] [--limit N]\n")
@@ -205,6 +206,46 @@ func cmdMCP(client pb.MemoryServiceClient) {
 	if err := stdio.Listen(context.Background(), os.Stdin, os.Stdout); err != nil {
 		fatal(err)
 	}
+}
+
+// reorderArgs moves flags (--key val or --key=val) before positional args
+// so Go's flag package parses them regardless of where the user placed them.
+func reorderArgs(args []string, fs *flag.FlagSet) []string {
+	// Build set of known flag names for this FlagSet.
+	known := make(map[string]bool)
+	fs.VisitAll(func(f *flag.Flag) {
+		known[f.Name] = true
+	})
+
+	var flags, positional []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--" {
+			positional = append(positional, args[i+1:]...)
+			break
+		}
+		name := ""
+		if strings.HasPrefix(a, "--") {
+			name = strings.TrimPrefix(a, "--")
+		} else if strings.HasPrefix(a, "-") && len(a) > 1 {
+			name = strings.TrimPrefix(a, "-")
+		}
+		// Strip =value if present.
+		if eqIdx := strings.IndexByte(name, '='); eqIdx >= 0 {
+			name = name[:eqIdx]
+		}
+		if name != "" && known[name] {
+			flags = append(flags, a)
+			// If the flag doesn't contain '=' and isn't a bool flag, consume next arg as value.
+			if !strings.Contains(a, "=") && i+1 < len(args) {
+				flags = append(flags, args[i+1])
+				i++
+			}
+		} else {
+			positional = append(positional, a)
+		}
+	}
+	return append(flags, positional...)
 }
 
 func printJSON(v interface{}) {
