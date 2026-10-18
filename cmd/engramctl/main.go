@@ -10,6 +10,7 @@ import (
 	"time"
 
 	mcpserver "github.com/mark3labs/mcp-go/server"
+	"github.com/shrec21/engram/internal/client"
 	engrammcp "github.com/shrec21/engram/mcp"
 	pb "github.com/shrec21/engram/proto/engrampb"
 	"google.golang.org/grpc"
@@ -28,36 +29,45 @@ func main() {
 		addr = "localhost:50051"
 	}
 
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		fatal(err)
-	}
-	defer conn.Close()
-
-	client := pb.NewMemoryServiceClient(conn)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
 	switch os.Args[1] {
-	case "put":
-		cmdPut(ctx, client, os.Args[2:])
-	case "get":
-		cmdGet(ctx, client, os.Args[2:])
-	case "cas":
-		cmdCAS(ctx, client, os.Args[2:])
-	case "delete":
-		cmdDelete(ctx, client, os.Args[2:])
-	case "list":
-		cmdList(ctx, client, os.Args[2:])
 	case "mcp":
-		cmdMCP(client)
+		cmdMCP(addr)
+	case "cluster-status":
+		cmdClusterStatus(addr)
+	case "add-voter":
+		cmdAddVoter(addr, os.Args[2:])
+	case "remove-server":
+		cmdRemoveServer(addr, os.Args[2:])
 	default:
-		usage()
-		os.Exit(1)
+		// For standard memory commands, use the smart client.
+		c, err := client.New(addr, "engramctl-"+fmt.Sprintf("%d", os.Getpid()))
+		if err != nil {
+			fatal(err)
+		}
+		defer c.Close()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		switch os.Args[1] {
+		case "put":
+			cmdPut(ctx, c, os.Args[2:])
+		case "get":
+			cmdGet(ctx, c, os.Args[2:])
+		case "cas":
+			cmdCAS(ctx, c, os.Args[2:])
+		case "delete":
+			cmdDelete(ctx, c, os.Args[2:])
+		case "list":
+			cmdList(ctx, c, os.Args[2:])
+		default:
+			usage()
+			os.Exit(1)
+		}
 	}
 }
 
-func cmdPut(ctx context.Context, client pb.MemoryServiceClient, args []string) {
+func cmdPut(ctx context.Context, c *client.Client, args []string) {
 	fs := flag.NewFlagSet("put", flag.ExitOnError)
 	createdBy := fs.String("created-by", "", "agent ID")
 	source := fs.String("source", "", "provenance")
@@ -83,25 +93,27 @@ func cmdPut(ctx context.Context, client pb.MemoryServiceClient, args []string) {
 		req.ExpiresAt = timestamppb.New(time.Now().Add(*ttl))
 	}
 
-	resp, err := client.Put(ctx, req)
+	resp, err := c.Put(ctx, req)
 	if err != nil {
 		fatal(err)
 	}
 	fmt.Printf("version: %d\n", resp.Version)
 }
 
-func cmdGet(ctx context.Context, client pb.MemoryServiceClient, args []string) {
+func cmdGet(ctx context.Context, c *client.Client, args []string) {
 	fs := flag.NewFlagSet("get", flag.ExitOnError)
+	consistency := fs.String("consistency", "session", "consistency level: session, linearizable, stale")
 	fs.Parse(reorderArgs(args, fs))
 
 	if fs.NArg() < 2 {
-		fmt.Fprintf(os.Stderr, "usage: engramctl get <namespace> <key>\n")
+		fmt.Fprintf(os.Stderr, "usage: engramctl get <namespace> <key> [--consistency level]\n")
 		os.Exit(1)
 	}
 
-	resp, err := client.Get(ctx, &pb.GetRequest{
-		Namespace: fs.Arg(0),
-		Key:       fs.Arg(1),
+	resp, err := c.Get(ctx, &pb.GetRequest{
+		Namespace:   fs.Arg(0),
+		Key:         fs.Arg(1),
+		Consistency: parseConsistency(*consistency),
 	})
 	if err != nil {
 		fatal(err)
@@ -110,7 +122,7 @@ func cmdGet(ctx context.Context, client pb.MemoryServiceClient, args []string) {
 	printJSON(resp.Record)
 }
 
-func cmdCAS(ctx context.Context, client pb.MemoryServiceClient, args []string) {
+func cmdCAS(ctx context.Context, c *client.Client, args []string) {
 	fs := flag.NewFlagSet("cas", flag.ExitOnError)
 	version := fs.Uint64("version", 0, "expected version (0 = create only)")
 	createdBy := fs.String("created-by", "", "agent ID")
@@ -138,14 +150,14 @@ func cmdCAS(ctx context.Context, client pb.MemoryServiceClient, args []string) {
 		req.ExpiresAt = timestamppb.New(time.Now().Add(*ttl))
 	}
 
-	resp, err := client.CompareAndSet(ctx, req)
+	resp, err := c.CompareAndSet(ctx, req)
 	if err != nil {
 		fatal(err)
 	}
 	fmt.Printf("version: %d\n", resp.Version)
 }
 
-func cmdDelete(ctx context.Context, client pb.MemoryServiceClient, args []string) {
+func cmdDelete(ctx context.Context, c *client.Client, args []string) {
 	fs := flag.NewFlagSet("delete", flag.ExitOnError)
 	version := fs.Uint64("version", 0, "expected version (0 = unconditional)")
 	fs.Parse(reorderArgs(args, fs))
@@ -155,7 +167,7 @@ func cmdDelete(ctx context.Context, client pb.MemoryServiceClient, args []string
 		os.Exit(1)
 	}
 
-	_, err := client.Delete(ctx, &pb.DeleteRequest{
+	_, err := c.Delete(ctx, &pb.DeleteRequest{
 		Namespace:       fs.Arg(0),
 		Key:             fs.Arg(1),
 		ExpectedVersion: *version,
@@ -166,24 +178,26 @@ func cmdDelete(ctx context.Context, client pb.MemoryServiceClient, args []string
 	fmt.Println("deleted")
 }
 
-func cmdList(ctx context.Context, client pb.MemoryServiceClient, args []string) {
+func cmdList(ctx context.Context, c *client.Client, args []string) {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
 	prefix := fs.String("prefix", "", "key prefix filter")
 	limit := fs.Int("limit", 100, "max records per page")
+	consistency := fs.String("consistency", "session", "consistency level: session, linearizable, stale")
 	fs.Parse(reorderArgs(args, fs))
 
 	if fs.NArg() < 1 {
-		fmt.Fprintf(os.Stderr, "usage: engramctl list <namespace> [--prefix X] [--limit N]\n")
+		fmt.Fprintf(os.Stderr, "usage: engramctl list <namespace> [--prefix X] [--limit N] [--consistency level]\n")
 		os.Exit(1)
 	}
 
 	pageToken := ""
 	for {
-		resp, err := client.List(ctx, &pb.ListRequest{
-			Namespace: fs.Arg(0),
-			KeyPrefix: *prefix,
-			Limit:     int32(*limit),
-			PageToken: pageToken,
+		resp, err := c.List(ctx, &pb.ListRequest{
+			Namespace:   fs.Arg(0),
+			KeyPrefix:   *prefix,
+			Limit:       int32(*limit),
+			PageToken:   pageToken,
+			Consistency: parseConsistency(*consistency),
 		})
 		if err != nil {
 			fatal(err)
@@ -200,12 +214,94 @@ func cmdList(ctx context.Context, client pb.MemoryServiceClient, args []string) 
 	}
 }
 
-func cmdMCP(client pb.MemoryServiceClient) {
-	srv := engrammcp.NewServer(client)
+func cmdMCP(addr string) {
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		fatal(err)
+	}
+	defer conn.Close()
+
+	memClient := pb.NewMemoryServiceClient(conn)
+	srv := engrammcp.NewServer(memClient)
 	stdio := mcpserver.NewStdioServer(srv)
 	if err := stdio.Listen(context.Background(), os.Stdin, os.Stdout); err != nil {
 		fatal(err)
 	}
+}
+
+func cmdClusterStatus(addr string) {
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		fatal(err)
+	}
+	defer conn.Close()
+
+	adminClient := pb.NewAdminServiceClient(conn)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	resp, err := adminClient.GetClusterStatus(ctx, &pb.GetClusterStatusRequest{})
+	if err != nil {
+		fatal(err)
+	}
+	printJSON(resp)
+}
+
+func cmdAddVoter(addr string, args []string) {
+	fs := flag.NewFlagSet("add-voter", flag.ExitOnError)
+	fs.Parse(args)
+
+	if fs.NArg() < 2 {
+		fmt.Fprintf(os.Stderr, "usage: engramctl add-voter <server-id> <raft-address>\n")
+		os.Exit(1)
+	}
+
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		fatal(err)
+	}
+	defer conn.Close()
+
+	adminClient := pb.NewAdminServiceClient(conn)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	_, err = adminClient.AddVoter(ctx, &pb.AddVoterRequest{
+		ServerId: fs.Arg(0),
+		Address:  fs.Arg(1),
+	})
+	if err != nil {
+		fatal(err)
+	}
+	fmt.Println("voter added")
+}
+
+func cmdRemoveServer(addr string, args []string) {
+	fs := flag.NewFlagSet("remove-server", flag.ExitOnError)
+	fs.Parse(args)
+
+	if fs.NArg() < 1 {
+		fmt.Fprintf(os.Stderr, "usage: engramctl remove-server <server-id>\n")
+		os.Exit(1)
+	}
+
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		fatal(err)
+	}
+	defer conn.Close()
+
+	adminClient := pb.NewAdminServiceClient(conn)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	_, err = adminClient.RemoveServer(ctx, &pb.RemoveServerRequest{
+		ServerId: fs.Arg(0),
+	})
+	if err != nil {
+		fatal(err)
+	}
+	fmt.Println("server removed")
 }
 
 // reorderArgs moves flags (--key val or --key=val) before positional args
@@ -248,6 +344,17 @@ func reorderArgs(args []string, fs *flag.FlagSet) []string {
 	return append(flags, positional...)
 }
 
+func parseConsistency(s string) pb.ConsistencyLevel {
+	switch strings.ToLower(s) {
+	case "linearizable":
+		return pb.ConsistencyLevel_CONSISTENCY_LINEARIZABLE
+	case "stale":
+		return pb.ConsistencyLevel_CONSISTENCY_STALE
+	default:
+		return pb.ConsistencyLevel_CONSISTENCY_SESSION
+	}
+}
+
 func printJSON(v interface{}) {
 	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
@@ -261,14 +368,21 @@ func usage() {
 
 Usage:
   engramctl put    <namespace> <key> <value> [--created-by X] [--source X] [--confidence N] [--ttl D]
-  engramctl get    <namespace> <key>
+  engramctl get    <namespace> <key> [--consistency level]
   engramctl cas    <namespace> <key> <value> --version N [--created-by X] [--source X] [--confidence N] [--ttl D]
   engramctl delete <namespace> <key> [--version N]
-  engramctl list   <namespace> [--prefix X] [--limit N]
+  engramctl list   <namespace> [--prefix X] [--limit N] [--consistency level]
   engramctl mcp    (start MCP stdio server)
+
+Admin:
+  engramctl cluster-status
+  engramctl add-voter <server-id> <raft-address>
+  engramctl remove-server <server-id>
 
 Environment:
   ENGRAM_ADDR  gRPC server address (default: localhost:50051)
+
+Consistency levels: session (default), linearizable, stale
 `)
 }
 
