@@ -1,6 +1,7 @@
 package decay
 
 import (
+	"context"
 	"log"
 	"time"
 
@@ -10,27 +11,46 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-// Sweeper periodically scans for and removes expired records through Apply.
+// Proposer submits commands through the Raft log (or directly for single-node).
+type Proposer interface {
+	Propose(ctx context.Context, cmd *pb.Command) (*pb.CommandResult, uint64, error)
+}
+
+// Sweeper periodically scans for and removes expired records through the proposer.
+// Implements LeaderService: started/stopped by LeaderMonitor.
 type Sweeper struct {
-	store    *store.Store
+	scanner  *store.Store
+	proposer Proposer
 	clock    clock.Clock
 	interval time.Duration
 	stopCh   chan struct{}
 	doneCh   chan struct{}
 }
 
-func NewSweeper(s *store.Store, clk clock.Clock, interval time.Duration) *Sweeper {
+// NewSweeper creates a sweeper. For single-node mode, proposer wraps store.Apply directly.
+func NewSweeper(scanner *store.Store, proposer Proposer, clk clock.Clock, interval time.Duration) *Sweeper {
 	return &Sweeper{
-		store:    s,
+		scanner:  scanner,
+		proposer: proposer,
 		clock:    clk,
 		interval: interval,
-		stopCh:   make(chan struct{}),
-		doneCh:   make(chan struct{}),
 	}
 }
 
-// Run starts the sweep loop. Call from a goroutine.
-func (sw *Sweeper) Run() {
+// Start implements LeaderService. Starts the sweep loop in a goroutine.
+func (sw *Sweeper) Start() {
+	sw.stopCh = make(chan struct{})
+	sw.doneCh = make(chan struct{})
+	go sw.run()
+}
+
+// Stop implements LeaderService. Signals the sweeper to shut down and waits.
+func (sw *Sweeper) Stop() {
+	close(sw.stopCh)
+	<-sw.doneCh
+}
+
+func (sw *Sweeper) run() {
 	defer close(sw.doneCh)
 	ticker := time.NewTicker(sw.interval)
 	defer ticker.Stop()
@@ -45,22 +65,17 @@ func (sw *Sweeper) Run() {
 	}
 }
 
-// Stop signals the sweeper to shut down and waits for it.
-func (sw *Sweeper) Stop() {
-	close(sw.stopCh)
-	<-sw.doneCh
-}
-
 // SweepOnce runs a single sweep pass. Exported for testing.
 func (sw *Sweeper) SweepOnce() {
 	now := sw.clock.Now()
 
-	expired, err := sw.store.ScanExpired(now)
+	expired, err := sw.scanner.ScanExpired(now)
 	if err != nil {
 		log.Printf("sweep scan error: %v", err)
 		return
 	}
 
+	ctx := context.Background()
 	for _, e := range expired {
 		cmd := &pb.Command{
 			Timestamp: timestamppb.New(now),
@@ -72,7 +87,7 @@ func (sw *Sweeper) SweepOnce() {
 				},
 			},
 		}
-		if _, err := sw.store.Apply(cmd); err != nil {
+		if _, _, err := sw.proposer.Propose(ctx, cmd); err != nil {
 			log.Printf("sweep delete %s/%s: %v", e.Namespace, e.Key, err)
 		}
 	}

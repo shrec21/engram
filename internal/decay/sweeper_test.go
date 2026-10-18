@@ -1,6 +1,7 @@
 package decay
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -13,6 +14,16 @@ import (
 )
 
 var baseTime = time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+
+// localProposer wraps store.Apply for single-node testing.
+type localProposer struct {
+	store *store.Store
+}
+
+func (p *localProposer) Propose(_ context.Context, cmd *pb.Command) (*pb.CommandResult, uint64, error) {
+	result, err := p.store.Apply(cmd)
+	return result, 0, err
+}
 
 func putWithTTL(t *testing.T, s *store.Store, ns, key string, value []byte, ts, expiresAt time.Time) {
 	t.Helper()
@@ -65,7 +76,7 @@ func TestSweeperDeletesExpiredRecords(t *testing.T) {
 	clk.Advance(2 * time.Hour)
 
 	// Sweep.
-	sw := NewSweeper(s, clk, time.Minute)
+	sw := NewSweeper(s, &localProposer{store: s}, clk, time.Minute)
 	sw.SweepOnce()
 
 	// Expired record is gone (deleted from Pebble, not just invisible).
@@ -89,7 +100,7 @@ func TestSweeperLeavesNonExpiredAlone(t *testing.T) {
 	// TTL in the future.
 	putWithTTL(t, s, "ns", "future", []byte("ok"), baseTime, baseTime.Add(24*time.Hour))
 
-	sw := NewSweeper(s, clk, time.Minute)
+	sw := NewSweeper(s, &localProposer{store: s}, clk, time.Minute)
 	sw.SweepOnce()
 
 	rec, err := s.Get("ns", "future")
@@ -110,10 +121,32 @@ func TestSweeperMultipleExpired(t *testing.T) {
 	// Advance past all TTLs.
 	clk.Advance(time.Hour)
 
-	sw := NewSweeper(s, clk, time.Minute)
+	sw := NewSweeper(s, &localProposer{store: s}, clk, time.Minute)
 	sw.SweepOnce()
 
 	expired, err := s.ScanExpired(clk.Now())
 	require.NoError(t, err)
 	assert.Empty(t, expired)
+}
+
+func TestTouchFlusher(t *testing.T) {
+	clk := clock.NewTestClock(baseTime)
+	s, err := store.New(t.TempDir(), clk)
+	require.NoError(t, err)
+	defer s.Close()
+
+	put(t, s, "ns", "k", []byte("v"), baseTime)
+
+	tracker := store.NewAccessTracker()
+	t1 := baseTime.Add(time.Minute)
+	tracker.Track("ns", "k", t1)
+	tracker.Track("ns", "k", t1.Add(time.Second))
+
+	flusher := NewTouchFlusher(tracker, &localProposer{store: s}, time.Second)
+	flusher.FlushOnce()
+
+	rec, err := s.Get("ns", "k")
+	require.NoError(t, err)
+	require.NotNil(t, rec)
+	assert.Equal(t, uint64(2), rec.AccessCount)
 }

@@ -12,15 +12,45 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-// Server implements pb.MemoryServiceServer.
-type Server struct {
-	pb.UnimplementedMemoryServiceServer
-	store *store.Store
-	clock clock.Clock
+// Proposer submits commands through Raft (leader only).
+type Proposer interface {
+	Propose(ctx context.Context, cmd *pb.Command) (*pb.CommandResult, uint64, error)
 }
 
-func NewServer(s *store.Store, clk clock.Clock) *Server {
-	return &Server{store: s, clock: clk}
+// ReadStore provides read access to the Pebble state.
+type ReadStore interface {
+	Get(namespace, key string) (*pb.MemoryRecord, error)
+	List(namespace, keyPrefix string, limit int, pageToken string) ([]*pb.MemoryRecord, string, error)
+}
+
+// ClusterInfo provides Raft cluster state.
+type ClusterInfo interface {
+	Leader() (grpcAddr, id string, isLeader bool)
+	LinearizableBarrier(ctx context.Context) error
+	WaitForIndex(ctx context.Context, index uint64) error
+	AppliedIndex() uint64
+}
+
+// Server implements pb.MemoryServiceServer with Raft-aware routing.
+type Server struct {
+	pb.UnimplementedMemoryServiceServer
+	proposer Proposer
+	store    ReadStore
+	cluster  ClusterInfo
+	clock    clock.Clock
+	tracker  *store.AccessTracker
+}
+
+// NewServer creates a new gRPC server. When cluster is nil, single-node mode
+// is used (all writes go directly through Proposer, reads are local).
+func NewServer(proposer Proposer, st ReadStore, cluster ClusterInfo, clk clock.Clock, tracker *store.AccessTracker) *Server {
+	return &Server{
+		proposer: proposer,
+		store:    st,
+		cluster:  cluster,
+		clock:    clk,
+		tracker:  tracker,
+	}
 }
 
 func (s *Server) Put(ctx context.Context, req *pb.PutRequest) (*pb.PutResponse, error) {
@@ -28,8 +58,14 @@ func (s *Server) Put(ctx context.Context, req *pb.PutRequest) (*pb.PutResponse, 
 		return nil, err
 	}
 
+	if err := s.requireLeader(); err != nil {
+		return nil, err
+	}
+
 	cmd := &pb.Command{
 		Timestamp: timestamppb.New(s.clock.Now()),
+		ClientId:  req.ClientId,
+		Seq:       req.Seq,
 		Payload: &pb.Command_Put{
 			Put: &pb.PutCommand{
 				Namespace:  req.Namespace,
@@ -43,16 +79,23 @@ func (s *Server) Put(ctx context.Context, req *pb.PutRequest) (*pb.PutResponse, 
 		},
 	}
 
-	result, err := s.store.Apply(cmd)
+	result, index, err := s.proposer.Propose(ctx, cmd)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "apply: %v", err)
+		return nil, status.Errorf(codes.Internal, "propose: %v", err)
 	}
 
-	return &pb.PutResponse{Version: result.GetMutation().Version}, nil
+	return &pb.PutResponse{
+		Version:      result.GetMutation().Version,
+		AppliedIndex: index,
+	}, nil
 }
 
 func (s *Server) Get(ctx context.Context, req *pb.GetRequest) (*pb.GetResponse, error) {
 	if err := validateNamespaceKey(req.Namespace, req.Key); err != nil {
+		return nil, err
+	}
+
+	if err := s.waitForConsistency(ctx, req.Consistency, req.AppliedIndex); err != nil {
 		return nil, err
 	}
 
@@ -64,7 +107,20 @@ func (s *Server) Get(ctx context.Context, req *pb.GetRequest) (*pb.GetResponse, 
 		return nil, status.Errorf(codes.NotFound, "key %q not found in namespace %q", req.Key, req.Namespace)
 	}
 
-	return &pb.GetResponse{Record: rec}, nil
+	// Track access for the TouchFlusher.
+	if s.tracker != nil {
+		s.tracker.Track(req.Namespace, req.Key, s.clock.Now())
+	}
+
+	appliedIndex := uint64(0)
+	if s.cluster != nil {
+		appliedIndex = s.cluster.AppliedIndex()
+	}
+
+	return &pb.GetResponse{
+		Record:       rec,
+		AppliedIndex: appliedIndex,
+	}, nil
 }
 
 func (s *Server) CompareAndSet(ctx context.Context, req *pb.CompareAndSetRequest) (*pb.CompareAndSetResponse, error) {
@@ -72,8 +128,14 @@ func (s *Server) CompareAndSet(ctx context.Context, req *pb.CompareAndSetRequest
 		return nil, err
 	}
 
+	if err := s.requireLeader(); err != nil {
+		return nil, err
+	}
+
 	cmd := &pb.Command{
 		Timestamp: timestamppb.New(s.clock.Now()),
+		ClientId:  req.ClientId,
+		Seq:       req.Seq,
 		Payload: &pb.Command_CompareAndSet{
 			CompareAndSet: &pb.CompareAndSetCommand{
 				Namespace:       req.Namespace,
@@ -88,9 +150,9 @@ func (s *Server) CompareAndSet(ctx context.Context, req *pb.CompareAndSetRequest
 		},
 	}
 
-	result, err := s.store.Apply(cmd)
+	result, index, err := s.proposer.Propose(ctx, cmd)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "apply: %v", err)
+		return nil, status.Errorf(codes.Internal, "propose: %v", err)
 	}
 
 	if conflict := result.GetCasConflict(); conflict != nil {
@@ -99,7 +161,10 @@ func (s *Server) CompareAndSet(ctx context.Context, req *pb.CompareAndSetRequest
 			req.ExpectedVersion, conflict.CurrentVersion)
 	}
 
-	return &pb.CompareAndSetResponse{Version: result.GetMutation().Version}, nil
+	return &pb.CompareAndSetResponse{
+		Version:      result.GetMutation().Version,
+		AppliedIndex: index,
+	}, nil
 }
 
 func (s *Server) Delete(ctx context.Context, req *pb.DeleteRequest) (*pb.DeleteResponse, error) {
@@ -107,8 +172,14 @@ func (s *Server) Delete(ctx context.Context, req *pb.DeleteRequest) (*pb.DeleteR
 		return nil, err
 	}
 
+	if err := s.requireLeader(); err != nil {
+		return nil, err
+	}
+
 	cmd := &pb.Command{
 		Timestamp: timestamppb.New(s.clock.Now()),
+		ClientId:  req.ClientId,
+		Seq:       req.Seq,
 		Payload: &pb.Command_Delete{
 			Delete: &pb.DeleteCommand{
 				Namespace:       req.Namespace,
@@ -118,9 +189,9 @@ func (s *Server) Delete(ctx context.Context, req *pb.DeleteRequest) (*pb.DeleteR
 		},
 	}
 
-	result, err := s.store.Apply(cmd)
+	result, index, err := s.proposer.Propose(ctx, cmd)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "apply: %v", err)
+		return nil, status.Errorf(codes.Internal, "propose: %v", err)
 	}
 
 	if conflict := result.GetCasConflict(); conflict != nil {
@@ -129,12 +200,16 @@ func (s *Server) Delete(ctx context.Context, req *pb.DeleteRequest) (*pb.DeleteR
 			req.ExpectedVersion, conflict.CurrentVersion)
 	}
 
-	return &pb.DeleteResponse{}, nil
+	return &pb.DeleteResponse{AppliedIndex: index}, nil
 }
 
 func (s *Server) List(ctx context.Context, req *pb.ListRequest) (*pb.ListResponse, error) {
 	if req.Namespace == "" {
 		return nil, status.Error(codes.InvalidArgument, "namespace is required")
+	}
+
+	if err := s.waitForConsistency(ctx, req.Consistency, req.AppliedIndex); err != nil {
+		return nil, err
 	}
 
 	limit := int(req.Limit)
@@ -147,10 +222,63 @@ func (s *Server) List(ctx context.Context, req *pb.ListRequest) (*pb.ListRespons
 		return nil, status.Errorf(codes.Internal, "list: %v", err)
 	}
 
+	appliedIndex := uint64(0)
+	if s.cluster != nil {
+		appliedIndex = s.cluster.AppliedIndex()
+	}
+
 	return &pb.ListResponse{
 		Records:       records,
 		NextPageToken: nextToken,
+		AppliedIndex:  appliedIndex,
 	}, nil
+}
+
+// requireLeader returns a NOT_LEADER error with redirect info if this node
+// is not the leader. Returns nil if the node is the leader or no cluster info
+// is available (single-node mode).
+func (s *Server) requireLeader() error {
+	if s.cluster == nil {
+		return nil
+	}
+	grpcAddr, leaderID, isLeader := s.cluster.Leader()
+	if isLeader {
+		return nil
+	}
+
+	st := status.New(codes.Unavailable, "not the leader")
+	detail := &pb.NotLeaderDetail{
+		LeaderAddress: grpcAddr,
+		LeaderId:      leaderID,
+	}
+	st, err := st.WithDetails(detail)
+	if err != nil {
+		return status.Error(codes.Unavailable, "not the leader")
+	}
+	return st.Err()
+}
+
+// waitForConsistency enforces the requested consistency level before a read.
+func (s *Server) waitForConsistency(ctx context.Context, level pb.ConsistencyLevel, clientIndex uint64) error {
+	if s.cluster == nil {
+		return nil // single-node mode
+	}
+
+	switch level {
+	case pb.ConsistencyLevel_CONSISTENCY_LINEARIZABLE:
+		if err := s.cluster.LinearizableBarrier(ctx); err != nil {
+			return status.Errorf(codes.Unavailable, "linearizable barrier: %v", err)
+		}
+	case pb.ConsistencyLevel_CONSISTENCY_SESSION:
+		if clientIndex > 0 {
+			if err := s.cluster.WaitForIndex(ctx, clientIndex); err != nil {
+				return status.Errorf(codes.Unavailable, "wait for index: %v", err)
+			}
+		}
+	case pb.ConsistencyLevel_CONSISTENCY_STALE:
+		// No waiting — read local state immediately.
+	}
+	return nil
 }
 
 func validateNamespaceKey(namespace, key string) error {

@@ -20,6 +20,21 @@ import (
 
 var baseTime = time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 
+// localProposer adapts store.Apply for single-node use as a Proposer.
+type localProposer struct {
+	store *store.Store
+	index uint64
+}
+
+func (p *localProposer) Propose(_ context.Context, cmd *pb.Command) (*pb.CommandResult, uint64, error) {
+	result, err := p.store.Apply(cmd)
+	if err != nil {
+		return nil, 0, err
+	}
+	p.index++
+	return result, p.index, nil
+}
+
 type testEnv struct {
 	client pb.MemoryServiceClient
 	clk    *clock.TestClock
@@ -35,14 +50,17 @@ func setup(t *testing.T) *testEnv {
 	require.NoError(t, err)
 	t.Cleanup(func() { s.Close() })
 
-	srv := grpc.NewServer()
-	pb.RegisterMemoryServiceServer(srv, NewServer(s, clk))
+	proposer := &localProposer{store: s}
+	tracker := store.NewAccessTracker()
+
+	grpcSrv := grpc.NewServer()
+	pb.RegisterMemoryServiceServer(grpcSrv, NewServer(proposer, s, nil, clk, tracker))
 
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 
-	go srv.Serve(lis)
-	t.Cleanup(func() { srv.Stop() })
+	go grpcSrv.Serve(lis)
+	t.Cleanup(func() { grpcSrv.Stop() })
 
 	conn, err := grpc.NewClient(lis.Addr().String(),
 		grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -53,7 +71,7 @@ func setup(t *testing.T) *testEnv {
 		client: pb.NewMemoryServiceClient(conn),
 		clk:    clk,
 		conn:   conn,
-		srv:    srv,
+		srv:    grpcSrv,
 	}
 }
 
