@@ -75,6 +75,14 @@ func deleteCmd(ns, key string, expectedVersion uint64, ts time.Time) *pb.Command
 	}
 }
 
+func touchCmd(entries []*pb.TouchEntry) *pb.Command {
+	return &pb.Command{
+		Payload: &pb.Command_Touch{
+			Touch: &pb.TouchCommand{Entries: entries},
+		},
+	}
+}
+
 // --- Put tests ---
 
 func TestPutAndGet(t *testing.T) {
@@ -257,25 +265,83 @@ func TestGetLazyTTLExpiry(t *testing.T) {
 	assert.Nil(t, rec, "expired record should be invisible")
 }
 
-// --- Access metadata tests ---
+// --- Touch tests ---
 
-func TestGetUpdatesAccessMetadata(t *testing.T) {
-	s, clk := newTestStore(t)
+func TestApplyTouch(t *testing.T) {
+	s, _ := newTestStore(t)
 
 	_, err := s.Apply(putCmd("ns", "k", []byte("v"), baseTime))
 	require.NoError(t, err)
 
-	clk.Advance(time.Minute)
-	rec1, err := s.Get("ns", "k")
+	accessTime := baseTime.Add(5 * time.Minute)
+	res, err := s.Apply(touchCmd([]*pb.TouchEntry{
+		{
+			Namespace:       "ns",
+			Key:             "k",
+			LastAccessedAt:  timestamppb.New(accessTime),
+			AccessCountDelta: 3,
+		},
+	}))
 	require.NoError(t, err)
-	assert.Equal(t, uint64(1), rec1.AccessCount)
-	assert.Equal(t, baseTime.Add(time.Minute).Unix(), rec1.LastAccessedAt.AsTime().Unix())
+	require.NotNil(t, res.GetTouchResult())
 
-	clk.Advance(time.Minute)
-	rec2, err := s.Get("ns", "k")
+	rec, err := s.Get("ns", "k")
 	require.NoError(t, err)
-	assert.Equal(t, uint64(2), rec2.AccessCount)
-	assert.Equal(t, baseTime.Add(2*time.Minute).Unix(), rec2.LastAccessedAt.AsTime().Unix())
+	require.NotNil(t, rec)
+	assert.Equal(t, uint64(3), rec.AccessCount)
+	assert.Equal(t, accessTime.Unix(), rec.LastAccessedAt.AsTime().Unix())
+}
+
+func TestApplyTouchAccumulates(t *testing.T) {
+	s, _ := newTestStore(t)
+
+	_, err := s.Apply(putCmd("ns", "k", []byte("v"), baseTime))
+	require.NoError(t, err)
+
+	t1 := baseTime.Add(time.Minute)
+	_, err = s.Apply(touchCmd([]*pb.TouchEntry{
+		{Namespace: "ns", Key: "k", LastAccessedAt: timestamppb.New(t1), AccessCountDelta: 2},
+	}))
+	require.NoError(t, err)
+
+	t2 := baseTime.Add(2 * time.Minute)
+	_, err = s.Apply(touchCmd([]*pb.TouchEntry{
+		{Namespace: "ns", Key: "k", LastAccessedAt: timestamppb.New(t2), AccessCountDelta: 5},
+	}))
+	require.NoError(t, err)
+
+	rec, err := s.Get("ns", "k")
+	require.NoError(t, err)
+	assert.Equal(t, uint64(7), rec.AccessCount)
+	assert.Equal(t, t2.Unix(), rec.LastAccessedAt.AsTime().Unix())
+}
+
+func TestApplyTouchMissingKeyNoError(t *testing.T) {
+	s, _ := newTestStore(t)
+
+	res, err := s.Apply(touchCmd([]*pb.TouchEntry{
+		{Namespace: "ns", Key: "gone", LastAccessedAt: timestamppb.New(baseTime), AccessCountDelta: 1},
+	}))
+	require.NoError(t, err)
+	require.NotNil(t, res.GetTouchResult())
+}
+
+// --- Get is pure read (no access metadata write-back) ---
+
+func TestGetIsPureRead(t *testing.T) {
+	s, _ := newTestStore(t)
+
+	_, err := s.Apply(putCmd("ns", "k", []byte("v"), baseTime))
+	require.NoError(t, err)
+
+	// Multiple Gets should NOT change access metadata.
+	for i := 0; i < 5; i++ {
+		rec, err := s.Get("ns", "k")
+		require.NoError(t, err)
+		require.NotNil(t, rec)
+		assert.Equal(t, uint64(0), rec.AccessCount, "Get should not update access_count")
+		assert.Nil(t, rec.LastAccessedAt, "Get should not set last_accessed_at")
+	}
 }
 
 // --- List tests ---
@@ -459,6 +525,47 @@ func TestRestartDurability(t *testing.T) {
 	assert.Equal(t, uint64(1), rec.Version)
 }
 
+// --- Checkpoint / ReplaceFromDir tests ---
+
+func TestCheckpointAndRestore(t *testing.T) {
+	dir := t.TempDir()
+	clk := clock.NewTestClock(baseTime)
+
+	s, err := New(dir, clk)
+	require.NoError(t, err)
+
+	// Write some data.
+	_, err = s.Apply(putCmd("ns", "k1", []byte("v1"), baseTime))
+	require.NoError(t, err)
+	_, err = s.Apply(putCmd("ns", "k2", []byte("v2"), baseTime))
+	require.NoError(t, err)
+
+	// Checkpoint.
+	cpDir := t.TempDir()
+	require.NoError(t, s.Checkpoint(cpDir+"/cp"))
+
+	// Write more data after checkpoint.
+	_, err = s.Apply(putCmd("ns", "k3", []byte("v3"), baseTime))
+	require.NoError(t, err)
+
+	// Restore from checkpoint — should lose k3.
+	require.NoError(t, s.ReplaceFromDir(cpDir+"/cp"))
+
+	rec1, err := s.Get("ns", "k1")
+	require.NoError(t, err)
+	require.NotNil(t, rec1)
+	assert.Equal(t, []byte("v1"), rec1.Value)
+
+	rec2, err := s.Get("ns", "k2")
+	require.NoError(t, err)
+	require.NotNil(t, rec2)
+
+	// k3 was written after checkpoint — should be gone.
+	rec3, err := s.Get("ns", "k3")
+	require.NoError(t, err)
+	assert.Nil(t, rec3, "k3 should be lost after restore from checkpoint")
+}
+
 // --- Key encoding tests ---
 
 func TestEncodeDecodeKey(t *testing.T) {
@@ -474,6 +581,52 @@ func TestGetNonexistent(t *testing.T) {
 	rec, err := s.Get("ns", "missing")
 	require.NoError(t, err)
 	assert.Nil(t, rec)
+}
+
+// --- Dedup key tests ---
+
+func TestDedupKeyEncodeDecode(t *testing.T) {
+	clientID := "agent-123"
+	encoded := EncodeDedupKey(clientID)
+	assert.True(t, IsSystemKey(encoded))
+	assert.Equal(t, clientID, DecodeDedupKey(encoded))
+}
+
+func TestIsSystemKey(t *testing.T) {
+	assert.True(t, IsSystemKey([]byte{0xFF, 0x00}))
+	assert.False(t, IsSystemKey(EncodeKey("ns", "k")))
+	assert.False(t, IsSystemKey(nil))
+}
+
+// --- AccessTracker tests ---
+
+func TestAccessTrackerTrackAndDrain(t *testing.T) {
+	tracker := NewAccessTracker()
+
+	t1 := baseTime.Add(time.Minute)
+	t2 := baseTime.Add(2 * time.Minute)
+
+	tracker.Track("ns", "k1", t1)
+	tracker.Track("ns", "k1", t2) // second access to same key
+	tracker.Track("ns", "k2", t1)
+
+	deltas := tracker.Drain()
+	require.Len(t, deltas, 2)
+
+	deltaMap := make(map[string]AccessDelta)
+	for _, d := range deltas {
+		deltaMap[d.Namespace+"/"+d.Key] = d
+	}
+
+	d1 := deltaMap["ns/k1"]
+	assert.Equal(t, uint64(2), d1.CountDelta)
+	assert.Equal(t, t2, d1.LastAccessedAt)
+
+	d2 := deltaMap["ns/k2"]
+	assert.Equal(t, uint64(1), d2.CountDelta)
+
+	// Drain again — should be empty.
+	assert.Empty(t, tracker.Drain())
 }
 
 // --- Helpers ---

@@ -5,6 +5,35 @@ import (
 	"encoding/base64"
 )
 
+// SystemKeyPrefix is the prefix for all system keys (dedup, etc.).
+// System keys sort after all user keys since 0xFF is the highest byte.
+var SystemKeyPrefix = []byte{0xFF}
+
+// DedupKeyPrefix is the prefix for dedup table entries.
+// Layout: 0xFF 0x00 "dedup" 0x00 <client_id>
+var DedupKeyPrefix = []byte{0xFF, 0x00, 'd', 'e', 'd', 'u', 'p', 0x00}
+
+// EncodeDedupKey returns the Pebble key for a dedup entry.
+func EncodeDedupKey(clientID string) []byte {
+	buf := make([]byte, len(DedupKeyPrefix)+len(clientID))
+	copy(buf, DedupKeyPrefix)
+	copy(buf[len(DedupKeyPrefix):], clientID)
+	return buf
+}
+
+// DecodeDedupKey extracts the client_id from a dedup key. Returns "" if invalid.
+func DecodeDedupKey(raw []byte) string {
+	if !bytes.HasPrefix(raw, DedupKeyPrefix) {
+		return ""
+	}
+	return string(raw[len(DedupKeyPrefix):])
+}
+
+// IsSystemKey returns true if the key is in the system key range.
+func IsSystemKey(key []byte) bool {
+	return len(key) > 0 && key[0] == 0xFF
+}
+
 // EncodeKey produces the Pebble key: namespace + 0x00 + key.
 func EncodeKey(namespace, key string) []byte {
 	buf := make([]byte, len(namespace)+1+len(key))

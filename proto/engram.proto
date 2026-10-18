@@ -23,16 +23,27 @@ message MemoryRecord {
   uint64 access_count = 12;
 }
 
+// ── Consistency Levels ──
+
+enum ConsistencyLevel {
+  CONSISTENCY_SESSION = 0;       // default: wait for applied_index
+  CONSISTENCY_LINEARIZABLE = 1;  // VerifyLeader + Barrier
+  CONSISTENCY_STALE = 2;         // read local state immediately
+}
+
 // ── Deterministic Apply Interface ──
-// Command is serialized into the Raft log in Week 2.
+// Command is serialized into the Raft log.
 // Timestamps are assigned BEFORE Apply and carried in the command.
 
 message Command {
   google.protobuf.Timestamp timestamp = 1;
+  string client_id = 5;  // for exactly-once dedup
+  uint64 seq = 6;        // monotonic per client
   oneof payload {
     PutCommand put = 2;
     CompareAndSetCommand compare_and_set = 3;
     DeleteCommand delete = 4;
+    TouchCommand touch = 7;  // batched access metadata
   }
 }
 
@@ -63,12 +74,24 @@ message DeleteCommand {
   uint64 expected_version = 3; // 0 = unconditional
 }
 
+message TouchCommand {
+  repeated TouchEntry entries = 1;
+}
+
+message TouchEntry {
+  string namespace = 1;
+  string key = 2;
+  google.protobuf.Timestamp last_accessed_at = 3;
+  uint64 access_count_delta = 4;
+}
+
 // Apply returns this. Not in the Raft log, just the response.
 message CommandResult {
   oneof result {
     MutationResult mutation = 1;
     DeleteResult delete_result = 2;
     CASConflict cas_conflict = 3;
+    TouchResult touch_result = 4;
   }
 }
 
@@ -82,6 +105,8 @@ message CASConflict {
   uint64 current_version = 1;
 }
 
+message TouchResult {}
+
 // ── gRPC Service ──
 
 message PutRequest {
@@ -92,19 +117,25 @@ message PutRequest {
   string source = 5;
   float confidence = 6;
   google.protobuf.Timestamp expires_at = 7;
+  string client_id = 8;
+  uint64 seq = 9;
 }
 
 message PutResponse {
   uint64 version = 1;
+  uint64 applied_index = 2;
 }
 
 message GetRequest {
   string namespace = 1;
   string key = 2;
+  ConsistencyLevel consistency = 3;
+  uint64 applied_index = 4;  // client session token
 }
 
 message GetResponse {
   MemoryRecord record = 1;
+  uint64 applied_index = 2;
 }
 
 message CompareAndSetRequest {
@@ -116,30 +147,46 @@ message CompareAndSetRequest {
   string source = 6;
   float confidence = 7;
   google.protobuf.Timestamp expires_at = 8;
+  string client_id = 9;
+  uint64 seq = 10;
 }
 
 message CompareAndSetResponse {
   uint64 version = 1;
+  uint64 applied_index = 2;
 }
 
 message DeleteRequest {
   string namespace = 1;
   string key = 2;
   uint64 expected_version = 3;
+  string client_id = 4;
+  uint64 seq = 5;
 }
 
-message DeleteResponse {}
+message DeleteResponse {
+  uint64 applied_index = 1;
+}
 
 message ListRequest {
   string namespace = 1;
   string key_prefix = 2;
   int32 limit = 3;
-  string page_token = 4; // opaque; encodes last key seen
+  string page_token = 4;
+  ConsistencyLevel consistency = 5;
+  uint64 applied_index = 6;
 }
 
 message ListResponse {
   repeated MemoryRecord records = 1;
   string next_page_token = 2;
+  uint64 applied_index = 3;
+}
+
+// NOT_LEADER error detail for redirects.
+message NotLeaderDetail {
+  string leader_address = 1;  // gRPC address
+  string leader_id = 2;
 }
 
 service MemoryService {
@@ -148,4 +195,42 @@ service MemoryService {
   rpc CompareAndSet(CompareAndSetRequest) returns (CompareAndSetResponse);
   rpc Delete(DeleteRequest) returns (DeleteResponse);
   rpc List(ListRequest) returns (ListResponse);
+}
+
+// ── Admin Service ──
+
+service AdminService {
+  rpc AddVoter(AddVoterRequest) returns (AddVoterResponse);
+  rpc RemoveServer(RemoveServerRequest) returns (RemoveServerResponse);
+  rpc GetClusterStatus(GetClusterStatusRequest) returns (GetClusterStatusResponse);
+}
+
+message AddVoterRequest {
+  string server_id = 1;
+  string address = 2;  // Raft transport address
+}
+
+message AddVoterResponse {}
+
+message RemoveServerRequest {
+  string server_id = 1;
+}
+
+message RemoveServerResponse {}
+
+message GetClusterStatusRequest {}
+
+message GetClusterStatusResponse {
+  string leader_id = 1;
+  string leader_address = 2;
+  uint64 term = 3;
+  uint64 applied_index = 4;
+  uint64 commit_index = 5;
+  repeated ServerInfo servers = 6;
+}
+
+message ServerInfo {
+  string id = 1;
+  string address = 2;
+  string suffrage = 3;
 }

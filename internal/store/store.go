@@ -2,6 +2,8 @@ package store
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -13,10 +15,13 @@ import (
 )
 
 // Store is the core deterministic state machine backed by Pebble.
+// Apply is called from a single goroutine (the Raft FSM). The RWMutex
+// protects against snapshot restore (write lock) while reads continue (read lock).
 type Store struct {
 	db    *pebble.DB
+	path  string
 	clock clock.Clock
-	mu    sync.Mutex // serializes Apply calls; replaced by Raft log in Week 2
+	mu    sync.RWMutex // write: Apply + ReplaceFromDir; read: Get, List, ScanExpired
 }
 
 // New opens or creates a Pebble database at the given path.
@@ -25,7 +30,7 @@ func New(path string, clk clock.Clock) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("pebble open: %w", err)
 	}
-	return &Store{db: db, clock: clk}, nil
+	return &Store{db: db, path: path, clock: clk}, nil
 }
 
 // Close closes the underlying Pebble database.
@@ -33,9 +38,15 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
+// RawDB exposes the underlying Pebble instance for dedup and other system uses.
+func (s *Store) RawDB() *pebble.DB {
+	return s.db
+}
+
 // Apply executes a deterministic command against the store.
 // No wall-clock reads — all timestamps come from cmd.Timestamp.
-// The mutex serializes calls for single-node CAS correctness.
+// Caller (Raft FSM) ensures serial access; the write lock guards against
+// concurrent reads during snapshot restore.
 func (s *Store) Apply(cmd *pb.Command) (*pb.CommandResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -47,6 +58,8 @@ func (s *Store) Apply(cmd *pb.Command) (*pb.CommandResult, error) {
 		return s.applyCAS(cmd.Timestamp, p.CompareAndSet)
 	case *pb.Command_Delete:
 		return s.applyDelete(p.Delete)
+	case *pb.Command_Touch:
+		return s.applyTouch(p.Touch)
 	default:
 		return nil, fmt.Errorf("unknown command payload type: %T", cmd.Payload)
 	}
@@ -165,7 +178,6 @@ func (s *Store) applyCAS(ts *timestamppb.Timestamp, cmd *pb.CompareAndSetCommand
 	var createdAt *timestamppb.Timestamp
 	if cmd.ExpectedVersion > 0 {
 		// Updating: preserve original created_at by re-reading.
-		// We already read and validated above, safe to re-read.
 		d, c, err := s.db.Get(pkey)
 		if err == nil {
 			c.Close()
@@ -248,12 +260,52 @@ func (s *Store) applyDelete(cmd *pb.DeleteCommand) (*pb.CommandResult, error) {
 	}, nil
 }
 
-// Get retrieves a record and updates access metadata.
-// Returns (nil, nil) if the key does not exist or is expired.
-// Access metadata write-back holds the mutex to prevent clobbering concurrent Apply writes.
+// applyTouch applies batched access metadata updates. These are deterministic
+// since the values are carried in the command (flushed from AccessTracker).
+func (s *Store) applyTouch(cmd *pb.TouchCommand) (*pb.CommandResult, error) {
+	for _, entry := range cmd.Entries {
+		pkey := EncodeKey(entry.Namespace, entry.Key)
+
+		data, closer, err := s.db.Get(pkey)
+		if err == pebble.ErrNotFound {
+			continue // record deleted since touch was queued
+		}
+		if err != nil {
+			return nil, fmt.Errorf("pebble get for touch: %w", err)
+		}
+
+		var rec pb.MemoryRecord
+		if err := proto.Unmarshal(data, &rec); err != nil {
+			closer.Close()
+			return nil, fmt.Errorf("unmarshal for touch: %w", err)
+		}
+		closer.Close()
+
+		rec.LastAccessedAt = entry.LastAccessedAt
+		rec.AccessCount += entry.AccessCountDelta
+
+		encoded, err := proto.Marshal(&rec)
+		if err != nil {
+			return nil, fmt.Errorf("marshal touch: %w", err)
+		}
+
+		if err := s.db.Set(pkey, encoded, pebble.Sync); err != nil {
+			return nil, fmt.Errorf("pebble set touch: %w", err)
+		}
+	}
+
+	return &pb.CommandResult{
+		Result: &pb.CommandResult_TouchResult{
+			TouchResult: &pb.TouchResult{},
+		},
+	}, nil
+}
+
+// Get retrieves a record. Returns (nil, nil) if the key does not exist or is expired.
+// This is a pure read — access metadata is tracked externally by AccessTracker.
 func (s *Store) Get(namespace, key string) (*pb.MemoryRecord, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
 	pkey := EncodeKey(namespace, key)
 
@@ -278,21 +330,14 @@ func (s *Store) Get(namespace, key string) (*pb.MemoryRecord, error) {
 		return nil, nil
 	}
 
-	// Update access metadata (non-deterministic side-effect, outside Apply).
-	rec.LastAccessedAt = timestamppb.New(now)
-	rec.AccessCount++
-
-	updated, err := proto.Marshal(&rec)
-	if err != nil {
-		return nil, fmt.Errorf("marshal access update: %w", err)
-	}
-	_ = s.db.Set(pkey, updated, pebble.NoSync)
-
 	return &rec, nil
 }
 
 // List returns records in a namespace matching an optional key prefix, with pagination.
 func (s *Store) List(namespace, keyPrefix string, limit int, pageToken string) ([]*pb.MemoryRecord, string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	prefix := NamespacePrefixWithKey(namespace, keyPrefix)
 	upper := prefixUpperBound(prefix)
 
@@ -355,8 +400,14 @@ type ExpiredEntry struct {
 }
 
 // ScanExpired returns all records whose expires_at is before the given time.
+// System keys (prefix 0xFF) are skipped.
 func (s *Store) ScanExpired(before time.Time) ([]ExpiredEntry, error) {
-	iter, err := s.db.NewIter(nil)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	iter, err := s.db.NewIter(&pebble.IterOptions{
+		UpperBound: SystemKeyPrefix, // stop before system keys
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -374,4 +425,41 @@ func (s *Store) ScanExpired(before time.Time) ([]ExpiredEntry, error) {
 		}
 	}
 	return expired, iter.Error()
+}
+
+// Checkpoint creates a Pebble checkpoint at the given directory path.
+// Used for Raft snapshots.
+func (s *Store) Checkpoint(dir string) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.db.Checkpoint(dir)
+}
+
+// ReplaceFromDir closes the current Pebble DB, replaces its data directory
+// with the contents of srcDir, and reopens. Used for Raft snapshot restore.
+func (s *Store) ReplaceFromDir(srcDir string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if err := s.db.Close(); err != nil {
+		return fmt.Errorf("close db: %w", err)
+	}
+
+	// Remove old data dir and rename srcDir into its place.
+	if err := os.RemoveAll(s.path); err != nil {
+		return fmt.Errorf("remove old dir: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
+		return fmt.Errorf("mkdir parent: %w", err)
+	}
+	if err := os.Rename(srcDir, s.path); err != nil {
+		return fmt.Errorf("rename: %w", err)
+	}
+
+	db, err := pebble.Open(s.path, &pebble.Options{})
+	if err != nil {
+		return fmt.Errorf("reopen: %w", err)
+	}
+	s.db = db
+	return nil
 }
