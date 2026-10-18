@@ -3,18 +3,20 @@ package main
 import (
 	"context"
 	"flag"
-	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/shrec21/engram/internal/api"
 	"github.com/shrec21/engram/internal/clock"
 	"github.com/shrec21/engram/internal/decay"
+	_ "github.com/shrec21/engram/internal/metrics" // register metrics
 	engramraft "github.com/shrec21/engram/internal/raft"
 	"github.com/shrec21/engram/internal/store"
 	pb "github.com/shrec21/engram/proto/engrampb"
@@ -27,6 +29,9 @@ func main() {
 	dataDir := flag.String("data", "./engram-data", "data directory")
 	sweepInterval := flag.Duration("sweep-interval", 60*time.Second, "TTL sweep interval")
 	touchInterval := flag.Duration("touch-interval", 10*time.Second, "access metadata flush interval")
+
+	// Metrics flags.
+	metricsAddr := flag.String("metrics-addr", ":9090", "Prometheus metrics HTTP address (empty to disable)")
 
 	// Raft flags. Empty raft-addr means single-node (no Raft).
 	raftAddr := flag.String("raft-addr", "", "Raft transport address (e.g., :50052)")
@@ -101,6 +106,18 @@ func main() {
 		pb.RegisterAdminServiceServer(srv, api.NewAdminServer(raftNode))
 	}
 
+	// Start metrics HTTP server.
+	if *metricsAddr != "" {
+		mux := http.NewServeMux()
+		mux.Handle("/metrics", promhttp.Handler())
+		go func() {
+			log.Printf("metrics listening on %s", *metricsAddr)
+			if err := http.ListenAndServe(*metricsAddr, mux); err != nil && err != http.ErrServerClosed {
+				log.Printf("metrics server error: %v", err)
+			}
+		}()
+	}
+
 	lis, err := net.Listen("tcp", *addr)
 	if err != nil {
 		log.Fatalf("listen: %v", err)
@@ -156,9 +173,3 @@ func parsePeers(s string) []engramraft.Peer {
 
 // Verify localProposer satisfies Proposer at compile time.
 var _ api.Proposer = (*localProposer)(nil)
-
-// Verify RaftNode satisfies the interfaces we need.
-func init() {
-	// These are compile-time checks, verified by the type system.
-	_ = fmt.Sprintf // suppress unused import
-}
