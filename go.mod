@@ -14,6 +14,7 @@ require (
 
 require (
 	github.com/DataDog/zstd v1.5.2 // indirect
+	github.com/anishathalye/porcupine v1.3.1 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/boltdb/bolt v1.3.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
