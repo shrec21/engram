@@ -1,0 +1,76 @@
+services:
+  engram-1:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command:
+      - --addr=0.0.0.0:50051
+      - --raft-addr=0.0.0.0:50052
+      - --node-id=node-1
+      - --bootstrap
+      - --data=/data
+      - --metrics-addr=0.0.0.0:9090
+      - --peers=node-2=engram-2:50052/engram-2:50051,node-3=engram-3:50052/engram-3:50051
+    volumes:
+      - engram-1-data:/data
+    ports:
+      - "50051:50051"
+      - "9091:9090"
+
+  engram-2:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command:
+      - --addr=0.0.0.0:50051
+      - --raft-addr=0.0.0.0:50052
+      - --node-id=node-2
+      - --data=/data
+      - --metrics-addr=0.0.0.0:9090
+      - --peers=node-1=engram-1:50052/engram-1:50051,node-3=engram-3:50052/engram-3:50051
+    volumes:
+      - engram-2-data:/data
+    ports:
+      - "50052:50051"
+      - "9092:9090"
+
+  engram-3:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command:
+      - --addr=0.0.0.0:50051
+      - --raft-addr=0.0.0.0:50052
+      - --node-id=node-3
+      - --data=/data
+      - --metrics-addr=0.0.0.0:9090
+      - --peers=node-1=engram-1:50052/engram-1:50051,node-2=engram-2:50052/engram-2:50051
+    volumes:
+      - engram-3-data:/data
+    ports:
+      - "50053:50051"
+      - "9093:9090"
+
+  prometheus:
+    image: prom/prometheus:v3.4.1
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:11.6.0
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+    volumes:
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+
+volumes:
+  engram-1-data:
+  engram-2-data:
+  engram-3-data:
+  grafana-data:

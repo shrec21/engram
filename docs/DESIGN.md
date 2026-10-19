@@ -13,15 +13,67 @@ func (s *Store) Apply(cmd *pb.Command) (*pb.CommandResult, error)
 - No randomness or external I/O besides Pebble reads/writes.
 - The function is deterministic: given the same state and command, it produces the same result.
 
-**Why:** In Week 2, Apply becomes the Raft FSM's apply method. The Raft log
-serializes Commands across nodes. For replicas to converge, Apply must be
-deterministic — the same sequence of commands must produce identical state on
-every node. Any non-determinism (wall-clock, randomness, network calls) would
-cause replicas to diverge.
+**Why:** Apply is the Raft FSM's apply method. The Raft log serializes Commands
+across nodes. For replicas to converge, Apply must be deterministic — the same
+sequence of commands must produce identical state on every node. Any
+non-determinism (wall-clock, randomness, network calls) would cause replicas to
+diverge.
 
-On a single node (Week 1), a `sync.Mutex` serializes Apply calls. This ensures
-CAS read-check-write sequences are atomic. When Raft is added, the Raft log
-replaces this mutex as the serialization mechanism.
+In single-node mode, a `localProposer` calls Apply directly. In a Raft cluster,
+the Raft log serializes Apply calls through the FSM goroutine.
+
+## Raft Replication
+
+Engram uses hashicorp/raft with a 3-node cluster for fault tolerance.
+
+### Write Path
+
+1. Client sends a write (Put/CAS/Delete) to any node.
+2. If the node is not the leader, it returns `codes.Unavailable` with a
+   `NotLeaderDetail` containing the leader's gRPC address. The smart client
+   follows the redirect automatically.
+3. The leader wraps the request into a `pb.Command`, marshals it, and calls
+   `raft.Apply()`.
+4. Raft replicates the log entry to a majority of nodes.
+5. Each node's FSM calls `store.Apply(cmd)` to apply the command to Pebble.
+6. The leader returns the result to the client.
+
+### Read Path
+
+Three consistency levels:
+
+| Level | Guarantee | Cost |
+|-------|-----------|------|
+| **LINEARIZABLE** | Read reflects all committed writes | Leader VerifyLeader + Barrier |
+| **SESSION** | Read-your-writes via `applied_index` token | Wait for local index to catch up |
+| **STALE** | Local read, possibly stale | No coordination |
+
+Clients track `applied_index` from write responses and pass it on subsequent
+reads for SESSION consistency. The server waits until its local applied index
+is >= the client's token before serving the read.
+
+### Snapshots
+
+Snapshots use Pebble's `Checkpoint()` which creates a hardlink-based copy.
+The checkpoint directory is tar'd into the Raft snapshot sink. On restore,
+the tar is extracted and `store.ReplaceFromDir()` swaps the Pebble instance.
+
+Dedup table entries live in Pebble under the `\xFF\x00dedup\x00` prefix, so
+they survive snapshots naturally.
+
+## Exactly-Once Semantics
+
+Write requests carry `client_id` and `seq` (monotonically increasing per
+client). The FSM checks a dedup table before applying:
+
+1. If `client_id` is empty, skip dedup (fire-and-forget).
+2. If `seq <= recorded_seq` for that client, return the cached result.
+3. Otherwise, apply the command and record `{seq, result, timestamp}`.
+
+The dedup table is stored in Pebble under system key prefix `\xFF`, so it is
+included in snapshots and excluded from user-visible List/Scan operations.
+
+Entries idle for > 5 minutes are pruned on each FSM apply.
 
 ## Why CAS Instead of Last-Writer-Wins
 
@@ -57,15 +109,50 @@ Records support an optional `expires_at` timestamp. Expiry is enforced at two le
    Expired records are invisible — returned as not-found.
 
 2. **Eager (background sweep):** The decay sweeper periodically scans all records
-   and issues Delete commands through Apply for any that have expired. This
-   reclaims storage space and ensures the Raft log (in Week 2) carries the
-   deletion as a deterministic command.
+   and issues Delete commands through the Proposer interface. In Raft mode, this
+   means deletions go through the Raft log. In single-node mode, they go directly
+   to `store.Apply()`.
 
-The sweeper never deletes directly from Pebble. It always goes through Apply,
-so deletions replay correctly during Raft log replay.
+The sweeper is a `LeaderService` — it only runs on the current Raft leader.
+The `LeaderMonitor` starts it on leadership gain and stops it on loss.
 
 ## Access Metadata
 
-`last_accessed_at` and `access_count` are updated directly on read, bypassing
-Apply. These are node-local observational side-effects, not replicated state.
-In a Raft cluster, each node tracks its own access patterns independently.
+Read operations track `last_accessed_at` and `access_count` via an in-memory
+`AccessTracker` that accumulates deltas. A `TouchFlusher` (also a
+`LeaderService`) periodically drains the tracker and proposes a `TouchCommand`
+through Raft. This keeps access metadata replicated without writing to Pebble
+on every read.
+
+**Tradeoff:** Access stats are approximate. Deltas accumulated since the last
+flush are lost on crash. This is acceptable — access metadata is observational,
+not part of the correctness-critical state.
+
+## Key Interfaces
+
+```go
+// Proposer submits commands (Raft leader or local store).
+type Proposer interface {
+    Propose(ctx context.Context, cmd *pb.Command) (*pb.CommandResult, uint64, error)
+}
+
+// ReadStore provides read access to Pebble state.
+type ReadStore interface {
+    Get(namespace, key string) (*pb.MemoryRecord, error)
+    List(ns, prefix string, limit int, token string) ([]*pb.MemoryRecord, string, error)
+}
+
+// ClusterInfo provides Raft cluster state.
+type ClusterInfo interface {
+    Leader() (grpcAddr, id string, isLeader bool)
+    LinearizableBarrier(ctx context.Context) error
+    WaitForIndex(ctx context.Context, index uint64) error
+    AppliedIndex() uint64
+}
+
+// LeaderService runs only on the leader (sweeper, touch flusher).
+type LeaderService interface {
+    Start()
+    Stop()
+}
+```
