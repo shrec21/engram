@@ -10,6 +10,7 @@ import (
 	"time"
 
 	mcpserver "github.com/mark3labs/mcp-go/server"
+	"github.com/shrec21/engram/internal/bench"
 	"github.com/shrec21/engram/internal/client"
 	engrammcp "github.com/shrec21/engram/mcp"
 	pb "github.com/shrec21/engram/proto/engrampb"
@@ -38,6 +39,12 @@ func main() {
 		cmdAddVoter(addr, os.Args[2:])
 	case "remove-server":
 		cmdRemoveServer(addr, os.Args[2:])
+	case "set-decay-policy":
+		cmdSetDecayPolicy(addr, os.Args[2:])
+	case "get-decay-policy":
+		cmdGetDecayPolicy(addr, os.Args[2:])
+	case "bench":
+		cmdBench(addr, os.Args[2:])
 	default:
 		// For standard memory commands, use the smart client.
 		c, err := client.New(addr, "engramctl-"+fmt.Sprintf("%d", os.Getpid()))
@@ -60,6 +67,8 @@ func main() {
 			cmdDelete(ctx, c, os.Args[2:])
 		case "list":
 			cmdList(ctx, c, os.Args[2:])
+		case "search":
+			cmdSearch(ctx, c, os.Args[2:])
 		default:
 			usage()
 			os.Exit(1)
@@ -212,6 +221,145 @@ func cmdList(ctx context.Context, c *client.Client, args []string) {
 		}
 		pageToken = resp.NextPageToken
 	}
+}
+
+func cmdSearch(ctx context.Context, c *client.Client, args []string) {
+	fs := flag.NewFlagSet("search", flag.ExitOnError)
+	k := fs.Int("k", 10, "number of results")
+	prefix := fs.String("prefix", "", "key prefix filter")
+	createdBy := fs.String("created-by", "", "filter by creator")
+	minConf := fs.Float64("min-confidence", 0, "minimum confidence")
+	consistency := fs.String("consistency", "session", "consistency level")
+	fs.Parse(reorderArgs(args, fs))
+
+	if fs.NArg() < 2 {
+		fmt.Fprintf(os.Stderr, "usage: engramctl search <namespace> <query> [--k N] [--prefix X] [--created-by X]\n")
+		os.Exit(1)
+	}
+
+	resp, err := c.Search(ctx, &pb.SearchRequest{
+		Namespace:     fs.Arg(0),
+		QueryText:     fs.Arg(1),
+		K:             int32(*k),
+		KeyPrefix:     *prefix,
+		CreatedBy:     *createdBy,
+		MinConfidence: float32(*minConf),
+		Consistency:   parseConsistency(*consistency),
+	})
+	if err != nil {
+		fatal(err)
+	}
+
+	for _, r := range resp.Results {
+		printJSON(r)
+	}
+}
+
+func cmdSetDecayPolicy(addr string, args []string) {
+	fs := flag.NewFlagSet("set-decay-policy", flag.ExitOnError)
+	halfLife := fs.Float64("half-life", 0, "half-life in seconds")
+	accessWeight := fs.Float64("access-weight", 0, "access count weight")
+	minScore := fs.Float64("min-score", 0, "minimum score for eviction")
+	fs.Parse(args)
+
+	if fs.NArg() < 1 {
+		fmt.Fprintf(os.Stderr, "usage: engramctl set-decay-policy <namespace> --half-life N --access-weight N --min-score N\n")
+		os.Exit(1)
+	}
+
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		fatal(err)
+	}
+	defer conn.Close()
+
+	adminClient := pb.NewAdminServiceClient(conn)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	_, err = adminClient.SetDecayPolicy(ctx, &pb.SetDecayPolicyRequest{
+		Namespace: fs.Arg(0),
+		Policy: &pb.DecayPolicy{
+			HalfLifeSeconds: *halfLife,
+			AccessWeight:    *accessWeight,
+			MinScore:        *minScore,
+		},
+	})
+	if err != nil {
+		fatal(err)
+	}
+	fmt.Println("decay policy set")
+}
+
+func cmdGetDecayPolicy(addr string, args []string) {
+	fs := flag.NewFlagSet("get-decay-policy", flag.ExitOnError)
+	fs.Parse(args)
+
+	if fs.NArg() < 1 {
+		fmt.Fprintf(os.Stderr, "usage: engramctl get-decay-policy <namespace>\n")
+		os.Exit(1)
+	}
+
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		fatal(err)
+	}
+	defer conn.Close()
+
+	adminClient := pb.NewAdminServiceClient(conn)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	resp, err := adminClient.GetDecayPolicy(ctx, &pb.GetDecayPolicyRequest{
+		Namespace: fs.Arg(0),
+	})
+	if err != nil {
+		fatal(err)
+	}
+	printJSON(resp.Policy)
+}
+
+func cmdBench(addr string, args []string) {
+	fs := flag.NewFlagSet("bench", flag.ExitOnError)
+	namespace := fs.String("namespace", "bench", "benchmark namespace")
+	numRecords := fs.Int("records", 1000, "records to pre-populate")
+	duration := fs.Duration("duration", 10*time.Second, "benchmark duration")
+	rate := fs.Int("rate", 0, "target ops/sec (0=unlimited)")
+	workers := fs.Int("workers", 10, "concurrent workers")
+	readPct := fs.Float64("read-pct", 0.5, "read fraction 0-1")
+	valueSize := fs.Int("value-size", 256, "value size in bytes")
+	fs.Parse(args)
+
+	c, err := client.New(addr, "engramctl-bench")
+	if err != nil {
+		fatal(err)
+	}
+	defer c.Close()
+
+	ctx := context.Background()
+	cfg := bench.Config{
+		Namespace:  *namespace,
+		NumRecords: *numRecords,
+		Duration:   *duration,
+		RatePerSec: *rate,
+		Workers:    *workers,
+		ReadPct:    *readPct,
+		ValueSize:  *valueSize,
+	}
+
+	fmt.Fprintf(os.Stderr, "running benchmark: %d records, %v duration, %d workers, %.0f%% reads\n",
+		cfg.NumRecords, cfg.Duration, cfg.Workers, cfg.ReadPct*100)
+
+	result, err := bench.Run(ctx, c, cfg)
+	if err != nil {
+		fatal(err)
+	}
+
+	data, err := result.ToJSON()
+	if err != nil {
+		fatal(err)
+	}
+	fmt.Println(string(data))
 }
 
 func cmdMCP(addr string) {
@@ -372,12 +520,16 @@ Usage:
   engramctl cas    <namespace> <key> <value> --version N [--created-by X] [--source X] [--confidence N] [--ttl D]
   engramctl delete <namespace> <key> [--version N]
   engramctl list   <namespace> [--prefix X] [--limit N] [--consistency level]
+  engramctl search <namespace> <query> [--k N] [--prefix X] [--created-by X] [--min-confidence N]
+  engramctl bench  [--records N] [--duration D] [--workers N] [--rate N] [--read-pct F]
   engramctl mcp    (start MCP stdio server)
 
 Admin:
   engramctl cluster-status
   engramctl add-voter <server-id> <raft-address>
   engramctl remove-server <server-id>
+  engramctl set-decay-policy <namespace> --half-life N --access-weight N --min-score N
+  engramctl get-decay-policy <namespace>
 
 Environment:
   ENGRAM_ADDR  gRPC server address (default: localhost:50051)

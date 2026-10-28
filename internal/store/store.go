@@ -60,6 +60,10 @@ func (s *Store) Apply(cmd *pb.Command) (*pb.CommandResult, error) {
 		return s.applyDelete(p.Delete)
 	case *pb.Command_Touch:
 		return s.applyTouch(p.Touch)
+	case *pb.Command_SetEmbedding:
+		return s.applySetEmbedding(p.SetEmbedding)
+	case *pb.Command_SetDecayPolicy:
+		return s.applySetDecayPolicy(p.SetDecayPolicy)
 	default:
 		return nil, fmt.Errorf("unknown command payload type: %T", cmd.Payload)
 	}
@@ -93,6 +97,7 @@ func (s *Store) applyPut(ts *timestamppb.Timestamp, cmd *pb.PutCommand) (*pb.Com
 		Confidence: cmd.Confidence,
 		UpdatedAt:  ts,
 		ExpiresAt:  cmd.ExpiresAt,
+		Pinned:     cmd.Pinned,
 	}
 
 	if existing.CreatedAt != nil {
@@ -104,6 +109,11 @@ func (s *Store) applyPut(ts *timestamppb.Timestamp, cmd *pb.PutCommand) (*pb.Com
 	// Preserve access metadata across puts.
 	rec.LastAccessedAt = existing.LastAccessedAt
 	rec.AccessCount = existing.AccessCount
+
+	// Preserve embedding across puts (re-embedding is async).
+	rec.Embedding = existing.Embedding
+	rec.EmbeddingModel = existing.EmbeddingModel
+	rec.EmbeddedVersion = existing.EmbeddedVersion
 
 	encoded, err := proto.Marshal(rec)
 	if err != nil {
@@ -201,6 +211,22 @@ func (s *Store) applyCAS(ts *timestamppb.Timestamp, cmd *pb.CompareAndSetCommand
 		CreatedAt:  createdAt,
 		UpdatedAt:  ts,
 		ExpiresAt:  cmd.ExpiresAt,
+		Pinned:     cmd.Pinned,
+	}
+
+	// Preserve embedding from existing record if updating.
+	if cmd.ExpectedVersion > 0 {
+		d2, c2, err2 := s.db.Get(pkey)
+		if err2 == nil {
+			c2.Close()
+			var old2 pb.MemoryRecord
+			_ = proto.Unmarshal(d2, &old2)
+			rec.Embedding = old2.Embedding
+			rec.EmbeddingModel = old2.EmbeddingModel
+			rec.EmbeddedVersion = old2.EmbeddedVersion
+			rec.LastAccessedAt = old2.LastAccessedAt
+			rec.AccessCount = old2.AccessCount
+		}
 	}
 
 	encoded, err := proto.Marshal(rec)
@@ -425,6 +451,205 @@ func (s *Store) ScanExpired(before time.Time) ([]ExpiredEntry, error) {
 		}
 	}
 	return expired, iter.Error()
+}
+
+// applySetEmbedding sets the embedding on a record if the version matches.
+func (s *Store) applySetEmbedding(cmd *pb.SetEmbeddingCommand) (*pb.CommandResult, error) {
+	pkey := EncodeKey(cmd.Namespace, cmd.Key)
+
+	data, closer, err := s.db.Get(pkey)
+	if err == pebble.ErrNotFound {
+		// Record was deleted; embedding is stale.
+		return &pb.CommandResult{
+			Result: &pb.CommandResult_SetEmbeddingResult{
+				SetEmbeddingResult: &pb.SetEmbeddingResult{Applied: false},
+			},
+		}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("pebble get: %w", err)
+	}
+
+	var rec pb.MemoryRecord
+	if err := proto.Unmarshal(data, &rec); err != nil {
+		closer.Close()
+		return nil, fmt.Errorf("unmarshal: %w", err)
+	}
+	closer.Close()
+
+	if rec.Version != cmd.ExpectedVersion {
+		// Record was updated since embedding was computed.
+		return &pb.CommandResult{
+			Result: &pb.CommandResult_SetEmbeddingResult{
+				SetEmbeddingResult: &pb.SetEmbeddingResult{Applied: false},
+			},
+		}, nil
+	}
+
+	rec.Embedding = cmd.Embedding
+	rec.EmbeddingModel = cmd.EmbeddingModel
+	rec.EmbeddedVersion = cmd.ExpectedVersion
+
+	encoded, err := proto.Marshal(&rec)
+	if err != nil {
+		return nil, fmt.Errorf("marshal: %w", err)
+	}
+
+	if err := s.db.Set(pkey, encoded, pebble.Sync); err != nil {
+		return nil, fmt.Errorf("pebble set: %w", err)
+	}
+
+	return &pb.CommandResult{
+		Result: &pb.CommandResult_SetEmbeddingResult{
+			SetEmbeddingResult: &pb.SetEmbeddingResult{Applied: true},
+		},
+	}, nil
+}
+
+// applySetDecayPolicy stores a decay policy for a namespace in a system key.
+func (s *Store) applySetDecayPolicy(cmd *pb.SetDecayPolicyCommand) (*pb.CommandResult, error) {
+	pkey := EncodeDecayPolicyKey(cmd.Namespace)
+
+	encoded, err := proto.Marshal(cmd.Policy)
+	if err != nil {
+		return nil, fmt.Errorf("marshal policy: %w", err)
+	}
+
+	if err := s.db.Set(pkey, encoded, pebble.Sync); err != nil {
+		return nil, fmt.Errorf("pebble set policy: %w", err)
+	}
+
+	return &pb.CommandResult{
+		Result: &pb.CommandResult_SetDecayPolicyResult{
+			SetDecayPolicyResult: &pb.SetDecayPolicyResult{},
+		},
+	}, nil
+}
+
+// GetDecayPolicy returns the decay policy for a namespace, or nil if none set.
+func (s *Store) GetDecayPolicy(namespace string) (*pb.DecayPolicy, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	pkey := EncodeDecayPolicyKey(namespace)
+	data, closer, err := s.db.Get(pkey)
+	if err == pebble.ErrNotFound {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("pebble get: %w", err)
+	}
+	defer closer.Close()
+
+	var policy pb.DecayPolicy
+	if err := proto.Unmarshal(data, &policy); err != nil {
+		return nil, fmt.Errorf("unmarshal policy: %w", err)
+	}
+	return &policy, nil
+}
+
+// ListDecayPolicies returns all namespace decay policies.
+func (s *Store) ListDecayPolicies() (map[string]*pb.DecayPolicy, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	upper := prefixUpperBound(DecayPolicyKeyPrefix)
+	iter, err := s.db.NewIter(&pebble.IterOptions{
+		LowerBound: DecayPolicyKeyPrefix,
+		UpperBound: upper,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("new iter: %w", err)
+	}
+	defer iter.Close()
+
+	policies := make(map[string]*pb.DecayPolicy)
+	for iter.First(); iter.Valid(); iter.Next() {
+		ns := DecodeDecayPolicyKey(iter.Key())
+		if ns == "" {
+			continue
+		}
+		var policy pb.DecayPolicy
+		if err := proto.Unmarshal(iter.Value(), &policy); err != nil {
+			continue
+		}
+		policies[ns] = &policy
+	}
+	return policies, iter.Error()
+}
+
+// NeedingEmbeddingEntry identifies a record that needs embedding.
+type NeedingEmbeddingEntry struct {
+	Namespace string
+	Key       string
+	Version   uint64
+	Value     []byte
+}
+
+// ScanNeedingEmbedding returns records that have content but no current embedding.
+// A record needs embedding if: embedded_version < version (or no embedding at all).
+func (s *Store) ScanNeedingEmbedding(limit int) ([]NeedingEmbeddingEntry, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	iter, err := s.db.NewIter(&pebble.IterOptions{
+		UpperBound: SystemKeyPrefix, // stop before system keys
+	})
+	if err != nil {
+		return nil, err
+	}
+	defer iter.Close()
+
+	var entries []NeedingEmbeddingEntry
+	for iter.First(); iter.Valid() && (limit <= 0 || len(entries) < limit); iter.Next() {
+		var rec pb.MemoryRecord
+		if err := proto.Unmarshal(iter.Value(), &rec); err != nil {
+			continue
+		}
+		// Skip expired records.
+		if rec.ExpiresAt != nil && rec.ExpiresAt.AsTime().Before(s.clock.Now()) {
+			continue
+		}
+		// Needs embedding if embedded_version doesn't match current version.
+		if rec.EmbeddedVersion < rec.Version {
+			ns, key := DecodeKey(iter.Key())
+			entries = append(entries, NeedingEmbeddingEntry{
+				Namespace: ns,
+				Key:       key,
+				Version:   rec.Version,
+				Value:     rec.Value,
+			})
+		}
+	}
+	return entries, iter.Error()
+}
+
+// ScanAllRecords returns all non-expired user records. Used for HNSW index rebuild.
+func (s *Store) ScanAllRecords() ([]*pb.MemoryRecord, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	iter, err := s.db.NewIter(&pebble.IterOptions{
+		UpperBound: SystemKeyPrefix,
+	})
+	if err != nil {
+		return nil, err
+	}
+	defer iter.Close()
+
+	now := s.clock.Now()
+	var records []*pb.MemoryRecord
+	for iter.First(); iter.Valid(); iter.Next() {
+		var rec pb.MemoryRecord
+		if err := proto.Unmarshal(iter.Value(), &rec); err != nil {
+			continue
+		}
+		if rec.ExpiresAt != nil && rec.ExpiresAt.AsTime().Before(now) {
+			continue
+		}
+		records = append(records, &rec)
+	}
+	return records, iter.Error()
 }
 
 // Checkpoint creates a Pebble checkpoint at the given directory path.

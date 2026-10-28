@@ -18,21 +18,33 @@ type ApplyResult struct {
 	Err    error
 }
 
-// FSM implements hashicorp/raft.FSM, wrapping the deterministic store.Apply.
-type FSM struct {
-	store        *store.Store
-	dedup        *DedupTable
-	indexWaiter  *IndexWaiter
-	snapshotDir  string // temp dir prefix for checkpoints
+// ApplyEvent is a post-apply notification sent on a buffered channel.
+// The consumer uses these to keep the HNSW index up to date.
+type ApplyEvent struct {
+	Index     uint64
+	Namespace string
+	Key       string
+	Deleted   bool
+	Embedding []float32 // non-nil only for SetEmbedding
 }
 
-// NewFSM creates a new FSM.
-func NewFSM(st *store.Store, dedup *DedupTable, iw *IndexWaiter, snapshotDir string) *FSM {
+// FSM implements hashicorp/raft.FSM, wrapping the deterministic store.Apply.
+type FSM struct {
+	store       *store.Store
+	dedup       *DedupTable
+	indexWaiter *IndexWaiter
+	snapshotDir string // temp dir prefix for checkpoints
+	applyCh     chan<- ApplyEvent
+}
+
+// NewFSM creates a new FSM. applyCh may be nil if no consumer is attached.
+func NewFSM(st *store.Store, dedup *DedupTable, iw *IndexWaiter, snapshotDir string, applyCh chan<- ApplyEvent) *FSM {
 	return &FSM{
 		store:       st,
 		dedup:       dedup,
 		indexWaiter: iw,
 		snapshotDir: snapshotDir,
+		applyCh:     applyCh,
 	}
 }
 
@@ -63,8 +75,59 @@ func (f *FSM) Apply(log *hraft.Log) interface{} {
 		_ = f.dedup.Record(cmd.ClientId, cmd.Seq, result, now)
 	}
 
+	// Non-blocking send of ApplyEvent for HNSW index consumer.
+	if f.applyCh != nil {
+		evt := f.buildApplyEvent(log.Index, &cmd, result)
+		if evt != nil {
+			select {
+			case f.applyCh <- *evt:
+			default:
+				// Consumer behind — it will catch up via Pebble scan.
+			}
+		}
+	}
+
 	f.indexWaiter.Notify(log.Index)
 	return &ApplyResult{Result: result}
+}
+
+// buildApplyEvent constructs an event from a command and its result.
+func (f *FSM) buildApplyEvent(index uint64, cmd *pb.Command, result *pb.CommandResult) *ApplyEvent {
+	switch p := cmd.Payload.(type) {
+	case *pb.Command_Put:
+		return &ApplyEvent{
+			Index:     index,
+			Namespace: p.Put.Namespace,
+			Key:       p.Put.Key,
+		}
+	case *pb.Command_CompareAndSet:
+		if result.GetMutation() != nil {
+			return &ApplyEvent{
+				Index:     index,
+				Namespace: p.CompareAndSet.Namespace,
+				Key:       p.CompareAndSet.Key,
+			}
+		}
+	case *pb.Command_Delete:
+		if result.GetDeleteResult() != nil {
+			return &ApplyEvent{
+				Index:     index,
+				Namespace: p.Delete.Namespace,
+				Key:       p.Delete.Key,
+				Deleted:   true,
+			}
+		}
+	case *pb.Command_SetEmbedding:
+		if result.GetSetEmbeddingResult() != nil && result.GetSetEmbeddingResult().Applied {
+			return &ApplyEvent{
+				Index:     index,
+				Namespace: p.SetEmbedding.Namespace,
+				Key:       p.SetEmbedding.Key,
+				Embedding: p.SetEmbedding.Embedding,
+			}
+		}
+	}
+	return nil
 }
 
 // Snapshot creates a Pebble checkpoint for the snapshot.
@@ -86,5 +149,16 @@ func (f *FSM) Snapshot() (hraft.FSMSnapshot, error) {
 // Restore replaces the store from a snapshot.
 func (f *FSM) Restore(rc io.ReadCloser) error {
 	defer rc.Close()
-	return restoreSnapshot(f.store, rc)
+	err := restoreSnapshot(f.store, rc)
+	if err != nil {
+		return err
+	}
+	// Signal that a restore happened — consumer should rebuild HNSW from Pebble.
+	if f.applyCh != nil {
+		select {
+		case f.applyCh <- ApplyEvent{Index: 0}: // index=0 signals rebuild
+		default:
+		}
+	}
+	return nil
 }

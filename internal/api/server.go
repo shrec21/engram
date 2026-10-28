@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"math"
+	"sort"
 	"strings"
 
 	"github.com/shrec21/engram/internal/clock"
@@ -21,6 +23,24 @@ type Proposer interface {
 type ReadStore interface {
 	Get(namespace, key string) (*pb.MemoryRecord, error)
 	List(namespace, keyPrefix string, limit int, pageToken string) ([]*pb.MemoryRecord, string, error)
+	GetDecayPolicy(namespace string) (*pb.DecayPolicy, error)
+}
+
+// SemanticSearcher provides vector similarity search.
+type SemanticSearcher interface {
+	Search(namespace string, query []float32, k int) []SearchHit
+}
+
+// SearchHit from HNSW index.
+type SearchHit struct {
+	Namespace  string
+	Key        string
+	Similarity float32
+}
+
+// Embedder produces vector embeddings from text.
+type Embedder interface {
+	Embed(ctx context.Context, texts []string) ([][]float32, error)
 }
 
 // ClusterInfo provides Raft cluster state.
@@ -39,17 +59,22 @@ type Server struct {
 	cluster  ClusterInfo
 	clock    clock.Clock
 	tracker  *store.AccessTracker
+	searcher SemanticSearcher // may be nil
+	embedder Embedder        // may be nil
 }
 
 // NewServer creates a new gRPC server. When cluster is nil, single-node mode
 // is used (all writes go directly through Proposer, reads are local).
-func NewServer(proposer Proposer, st ReadStore, cluster ClusterInfo, clk clock.Clock, tracker *store.AccessTracker) *Server {
+// searcher and embedder may be nil if semantic search is not enabled.
+func NewServer(proposer Proposer, st ReadStore, cluster ClusterInfo, clk clock.Clock, tracker *store.AccessTracker, searcher SemanticSearcher, embedder Embedder) *Server {
 	return &Server{
 		proposer: proposer,
 		store:    st,
 		cluster:  cluster,
 		clock:    clk,
 		tracker:  tracker,
+		searcher: searcher,
+		embedder: embedder,
 	}
 }
 
@@ -75,6 +100,7 @@ func (s *Server) Put(ctx context.Context, req *pb.PutRequest) (*pb.PutResponse, 
 				Source:     req.Source,
 				Confidence: req.Confidence,
 				ExpiresAt:  req.ExpiresAt,
+				Pinned:     req.Pinned,
 			},
 		},
 	}
@@ -146,6 +172,7 @@ func (s *Server) CompareAndSet(ctx context.Context, req *pb.CompareAndSetRequest
 				Source:          req.Source,
 				Confidence:      req.Confidence,
 				ExpiresAt:       req.ExpiresAt,
+				Pinned:          req.Pinned,
 			},
 		},
 	}
@@ -279,6 +306,139 @@ func (s *Server) waitForConsistency(ctx context.Context, level pb.ConsistencyLev
 		// No waiting — read local state immediately.
 	}
 	return nil
+}
+
+func (s *Server) Search(ctx context.Context, req *pb.SearchRequest) (*pb.SearchResponse, error) {
+	if req.Namespace == "" {
+		return nil, status.Error(codes.InvalidArgument, "namespace is required")
+	}
+	if req.QueryText == "" && len(req.QueryVector) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "query_text or query_vector is required")
+	}
+	if s.searcher == nil {
+		return nil, status.Error(codes.Unimplemented, "semantic search not enabled")
+	}
+
+	k := int(req.K)
+	if k <= 0 {
+		k = 10
+	}
+
+	if err := s.waitForConsistency(ctx, req.Consistency, req.AppliedIndex); err != nil {
+		return nil, err
+	}
+
+	// Determine query vector.
+	queryVec := req.QueryVector
+	if len(queryVec) == 0 && req.QueryText != "" {
+		if s.embedder == nil {
+			return nil, status.Error(codes.FailedPrecondition, "embedder not configured for query_text")
+		}
+		vecs, err := s.embedder.Embed(ctx, []string{req.QueryText})
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "embed query: %v", err)
+		}
+		queryVec = vecs[0]
+	}
+
+	// Search HNSW index.
+	hits := s.searcher.Search(req.Namespace, queryVec, k*3)
+
+	// Read records, apply filters, compute scores.
+	alpha := float64(req.SimilarityWeight)
+	if alpha <= 0 {
+		alpha = 0.7
+	}
+
+	now := s.clock.Now()
+
+	type scored struct {
+		result *pb.SearchResult
+		score  float64
+	}
+	var candidates []scored
+
+	for _, hit := range hits {
+		rec, err := s.store.Get(hit.Namespace, hit.Key)
+		if err != nil || rec == nil {
+			continue
+		}
+
+		// Apply filters.
+		if req.KeyPrefix != "" && !strings.HasPrefix(rec.Key, req.KeyPrefix) {
+			continue
+		}
+		if req.CreatedBy != "" && rec.CreatedBy != req.CreatedBy {
+			continue
+		}
+		if req.MinConfidence > 0 && rec.Confidence < req.MinConfidence {
+			continue
+		}
+		if req.UpdatedAfter != nil && rec.UpdatedAt != nil && rec.UpdatedAt.AsTime().Before(req.UpdatedAfter.AsTime()) {
+			continue
+		}
+
+		// Compute decay score.
+		decayScore := float64(rec.Confidence)
+		policy, _ := s.store.GetDecayPolicy(rec.Namespace)
+		if policy != nil && policy.HalfLifeSeconds > 0 {
+			updatedAt := now
+			if rec.UpdatedAt != nil {
+				updatedAt = rec.UpdatedAt.AsTime()
+			}
+			age := now.Sub(updatedAt).Seconds()
+			recency := math.Pow(2, -age/policy.HalfLifeSeconds)
+			accessBoost := 1.0
+			if policy.AccessWeight > 0 {
+				accessBoost = 1.0 + policy.AccessWeight*math.Log1p(float64(rec.AccessCount))
+			}
+			decayScore = float64(rec.Confidence) * recency * accessBoost
+		}
+
+		embeddingCurrent := rec.EmbeddedVersion == rec.Version
+		combined := alpha*float64(hit.Similarity) + (1-alpha)*decayScore
+
+		candidates = append(candidates, scored{
+			result: &pb.SearchResult{
+				Record:           rec,
+				Score:            float32(combined),
+				Similarity:       hit.Similarity,
+				DecayScore:       float32(decayScore),
+				EmbeddingCurrent: embeddingCurrent,
+			},
+			score: combined,
+		})
+	}
+
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].score > candidates[j].score
+	})
+
+	if len(candidates) > k {
+		candidates = candidates[:k]
+	}
+
+	results := make([]*pb.SearchResult, len(candidates))
+	for i, c := range candidates {
+		results[i] = c.result
+	}
+
+	appliedIndex := uint64(0)
+	if s.cluster != nil {
+		appliedIndex = s.cluster.AppliedIndex()
+	}
+
+	// Track access for returned records.
+	if s.tracker != nil {
+		for _, r := range results {
+			s.tracker.Track(r.Record.Namespace, r.Record.Key, now)
+		}
+	}
+
+	return &pb.SearchResponse{
+		Results:      results,
+		AppliedIndex: appliedIndex,
+	}, nil
 }
 
 func validateNamespaceKey(namespace, key string) error {

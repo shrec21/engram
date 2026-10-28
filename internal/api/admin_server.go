@@ -15,15 +15,23 @@ type ClusterAdmin interface {
 	GetClusterStatus() (*pb.GetClusterStatusResponse, error)
 }
 
+// DecayPolicyStore provides read access to decay policies.
+type DecayPolicyStore interface {
+	GetDecayPolicy(namespace string) (*pb.DecayPolicy, error)
+}
+
 // AdminServer implements pb.AdminServiceServer.
 type AdminServer struct {
 	pb.UnimplementedAdminServiceServer
-	admin ClusterAdmin
+	admin      ClusterAdmin
+	proposer   Proposer
+	policyStore DecayPolicyStore
 }
 
 // NewAdminServer creates a new admin gRPC server.
-func NewAdminServer(admin ClusterAdmin) *AdminServer {
-	return &AdminServer{admin: admin}
+// proposer and policyStore may be nil if decay policy management is not needed.
+func NewAdminServer(admin ClusterAdmin, proposer Proposer, policyStore DecayPolicyStore) *AdminServer {
+	return &AdminServer{admin: admin, proposer: proposer, policyStore: policyStore}
 }
 
 func (s *AdminServer) AddVoter(ctx context.Context, req *pb.AddVoterRequest) (*pb.AddVoterResponse, error) {
@@ -52,6 +60,52 @@ func (s *AdminServer) GetClusterStatus(ctx context.Context, req *pb.GetClusterSt
 		return nil, status.Errorf(codes.Internal, "cluster status: %v", err)
 	}
 	return resp, nil
+}
+
+func (s *AdminServer) SetDecayPolicy(ctx context.Context, req *pb.SetDecayPolicyRequest) (*pb.SetDecayPolicyResponse, error) {
+	if req.Namespace == "" {
+		return nil, status.Error(codes.InvalidArgument, "namespace is required")
+	}
+	if req.Policy == nil {
+		return nil, status.Error(codes.InvalidArgument, "policy is required")
+	}
+	if s.proposer == nil {
+		return nil, status.Error(codes.Unimplemented, "proposer not configured")
+	}
+
+	cmd := &pb.Command{
+		ClientId: req.ClientId,
+		Seq:      req.Seq,
+		Payload: &pb.Command_SetDecayPolicy{
+			SetDecayPolicy: &pb.SetDecayPolicyCommand{
+				Namespace: req.Namespace,
+				Policy:    req.Policy,
+			},
+		},
+	}
+
+	_, index, err := s.proposer.Propose(ctx, cmd)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "propose: %v", err)
+	}
+
+	return &pb.SetDecayPolicyResponse{AppliedIndex: index}, nil
+}
+
+func (s *AdminServer) GetDecayPolicy(ctx context.Context, req *pb.GetDecayPolicyRequest) (*pb.GetDecayPolicyResponse, error) {
+	if req.Namespace == "" {
+		return nil, status.Error(codes.InvalidArgument, "namespace is required")
+	}
+	if s.policyStore == nil {
+		return nil, status.Error(codes.Unimplemented, "policy store not configured")
+	}
+
+	policy, err := s.policyStore.GetDecayPolicy(req.Namespace)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "get policy: %v", err)
+	}
+
+	return &pb.GetDecayPolicyResponse{Policy: policy}, nil
 }
 
 var _ pb.AdminServiceServer = (*AdminServer)(nil)

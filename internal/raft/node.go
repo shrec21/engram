@@ -25,13 +25,15 @@ type Peer struct {
 
 // Config holds configuration for a RaftNode.
 type Config struct {
-	ID         string
-	RaftAddr   string
-	GRPCAddr   string
-	DataDir    string
-	Bootstrap  bool
-	Peers      []Peer
-	RaftConfig *hraft.Config
+	ID            string
+	RaftAddr      string
+	AdvertiseAddr string // if set, Raft advertises this addr (for toxiproxy)
+	GRPCAddr      string
+	DataDir       string
+	Bootstrap     bool
+	Peers         []Peer
+	RaftConfig    *hraft.Config
+	ApplyCh       chan<- ApplyEvent // optional post-apply event channel
 }
 
 // RaftNode orchestrates the Raft cluster machinery.
@@ -77,11 +79,16 @@ func NewRaftNode(cfg Config, st *store.Store) (*RaftNode, error) {
 	}
 
 	// Transport.
-	addr, err := net.ResolveTCPAddr("tcp", cfg.RaftAddr)
+	bindAddr := cfg.RaftAddr
+	advertiseAddr := cfg.AdvertiseAddr
+	if advertiseAddr == "" {
+		advertiseAddr = bindAddr
+	}
+	addr, err := net.ResolveTCPAddr("tcp", advertiseAddr)
 	if err != nil {
 		return nil, fmt.Errorf("resolve addr: %w", err)
 	}
-	transport, err := hraft.NewTCPTransport(cfg.RaftAddr, addr, 3, 10*time.Second, os.Stderr)
+	transport, err := hraft.NewTCPTransport(bindAddr, addr, 3, 10*time.Second, os.Stderr)
 	if err != nil {
 		return nil, fmt.Errorf("transport: %w", err)
 	}
@@ -89,7 +96,7 @@ func NewRaftNode(cfg Config, st *store.Store) (*RaftNode, error) {
 	// Index waiter + dedup.
 	iw := NewIndexWaiter()
 	dedup := NewDedupTable(st.RawDB())
-	fsm := NewFSM(st, dedup, iw, snapDir)
+	fsm := NewFSM(st, dedup, iw, snapDir, cfg.ApplyCh)
 
 	r, err := hraft.NewRaft(rc, fsm, boltStore, boltStore, snaps, transport)
 	if err != nil {

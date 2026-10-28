@@ -82,4 +82,60 @@ var (
 		Name:      "sweep_deleted_total",
 		Help:      "Total records deleted by TTL sweeper",
 	})
+
+	// Embedding metrics.
+	EmbeddingQueueDepth = promauto.NewGauge(prometheus.GaugeOpts{
+		Namespace: "engram",
+		Subsystem: "embedding",
+		Name:      "queue_depth",
+		Help:      "Number of records awaiting embedding",
+	})
+
+	EmbeddingDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+		Namespace: "engram",
+		Subsystem: "embedding",
+		Name:      "duration_seconds",
+		Help:      "Time to embed a batch of texts",
+		Buckets:   prometheus.DefBuckets,
+	})
+
+	EmbeddingFailures = promauto.NewCounter(prometheus.CounterOpts{
+		Namespace: "engram",
+		Subsystem: "embedding",
+		Name:      "failures_total",
+		Help:      "Total embedding failures",
+	})
+
+	// Search metrics.
+	SearchDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+		Namespace: "engram",
+		Subsystem: "search",
+		Name:      "duration_seconds",
+		Help:      "Search request latency",
+		Buckets:   prometheus.DefBuckets,
+	})
+
+	// Index metrics.
+	IndexRebuildDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+		Namespace: "engram",
+		Subsystem: "index",
+		Name:      "rebuild_duration_seconds",
+		Help:      "Time to rebuild HNSW index from Pebble",
+		Buckets:   prometheus.DefBuckets,
+	})
+
+	IndexSize = promauto.NewGauge(prometheus.GaugeOpts{
+		Namespace: "engram",
+		Subsystem: "index",
+		Name:      "size",
+		Help:      "Number of vectors in the HNSW index",
+	})
+
+	// Decay evictor metrics.
+	EvictDeletedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Namespace: "engram",
+		Subsystem: "decay",
+		Name:      "evict_deleted_total",
+		Help:      "Total records deleted by decay evictor",
+	})
 )

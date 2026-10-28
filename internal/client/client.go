@@ -152,6 +152,23 @@ func (c *Client) List(ctx context.Context, req *pb.ListRequest) (*pb.ListRespons
 	return nil, status.Error(codes.Unavailable, "too many redirects")
 }
 
+// Search performs a semantic search.
+func (c *Client) Search(ctx context.Context, req *pb.SearchRequest) (*pb.SearchResponse, error) {
+	req.AppliedIndex = c.getAppliedIndex()
+
+	for i := 0; i < maxRedirects; i++ {
+		resp, err := c.memory.Search(ctx, req)
+		if err == nil {
+			c.updateAppliedIndex(resp.AppliedIndex)
+			return resp, nil
+		}
+		if !c.handleRedirect(err) {
+			return nil, err
+		}
+	}
+	return nil, status.Error(codes.Unavailable, "too many redirects")
+}
+
 // Admin returns the admin service client.
 func (c *Client) Admin() pb.AdminServiceClient {
 	return c.admin

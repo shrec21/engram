@@ -24,6 +24,7 @@ const (
 	MemoryService_CompareAndSet_FullMethodName = "/engram.v1.MemoryService/CompareAndSet"
 	MemoryService_Delete_FullMethodName        = "/engram.v1.MemoryService/Delete"
 	MemoryService_List_FullMethodName          = "/engram.v1.MemoryService/List"
+	MemoryService_Search_FullMethodName        = "/engram.v1.MemoryService/Search"
 )
 
 // MemoryServiceClient is the client API for MemoryService service.
@@ -35,6 +36,7 @@ type MemoryServiceClient interface {
 	CompareAndSet(ctx context.Context, in *CompareAndSetRequest, opts ...grpc.CallOption) (*CompareAndSetResponse, error)
 	Delete(ctx context.Context, in *DeleteRequest, opts ...grpc.CallOption) (*DeleteResponse, error)
 	List(ctx context.Context, in *ListRequest, opts ...grpc.CallOption) (*ListResponse, error)
+	Search(ctx context.Context, in *SearchRequest, opts ...grpc.CallOption) (*SearchResponse, error)
 }
 
 type memoryServiceClient struct {
@@ -95,6 +97,16 @@ func (c *memoryServiceClient) List(ctx context.Context, in *ListRequest, opts ..
 	return out, nil
 }
 
+func (c *memoryServiceClient) Search(ctx context.Context, in *SearchRequest, opts ...grpc.CallOption) (*SearchResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SearchResponse)
+	err := c.cc.Invoke(ctx, MemoryService_Search_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // MemoryServiceServer is the server API for MemoryService service.
 // All implementations must embed UnimplementedMemoryServiceServer
 // for forward compatibility.
@@ -104,6 +116,7 @@ type MemoryServiceServer interface {
 	CompareAndSet(context.Context, *CompareAndSetRequest) (*CompareAndSetResponse, error)
 	Delete(context.Context, *DeleteRequest) (*DeleteResponse, error)
 	List(context.Context, *ListRequest) (*ListResponse, error)
+	Search(context.Context, *SearchRequest) (*SearchResponse, error)
 	mustEmbedUnimplementedMemoryServiceServer()
 }
 
@@ -128,6 +141,9 @@ func (UnimplementedMemoryServiceServer) Delete(context.Context, *DeleteRequest) 
 }
 func (UnimplementedMemoryServiceServer) List(context.Context, *ListRequest) (*ListResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method List not implemented")
+}
+func (UnimplementedMemoryServiceServer) Search(context.Context, *SearchRequest) (*SearchResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Search not implemented")
 }
 func (UnimplementedMemoryServiceServer) mustEmbedUnimplementedMemoryServiceServer() {}
 func (UnimplementedMemoryServiceServer) testEmbeddedByValue()                       {}
@@ -240,6 +256,24 @@ func _MemoryService_List_Handler(srv interface{}, ctx context.Context, dec func(
 	return interceptor(ctx, in, info, handler)
 }
 
+func _MemoryService_Search_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SearchRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MemoryServiceServer).Search(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MemoryService_Search_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MemoryServiceServer).Search(ctx, req.(*SearchRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // MemoryService_ServiceDesc is the grpc.ServiceDesc for MemoryService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -267,6 +301,10 @@ var MemoryService_ServiceDesc = grpc.ServiceDesc{
 			MethodName: "List",
 			Handler:    _MemoryService_List_Handler,
 		},
+		{
+			MethodName: "Search",
+			Handler:    _MemoryService_Search_Handler,
+		},
 	},
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "engram.proto",
@@ -276,6 +314,8 @@ const (
 	AdminService_AddVoter_FullMethodName         = "/engram.v1.AdminService/AddVoter"
 	AdminService_RemoveServer_FullMethodName     = "/engram.v1.AdminService/RemoveServer"
 	AdminService_GetClusterStatus_FullMethodName = "/engram.v1.AdminService/GetClusterStatus"
+	AdminService_SetDecayPolicy_FullMethodName   = "/engram.v1.AdminService/SetDecayPolicy"
+	AdminService_GetDecayPolicy_FullMethodName   = "/engram.v1.AdminService/GetDecayPolicy"
 )
 
 // AdminServiceClient is the client API for AdminService service.
@@ -285,6 +325,8 @@ type AdminServiceClient interface {
 	AddVoter(ctx context.Context, in *AddVoterRequest, opts ...grpc.CallOption) (*AddVoterResponse, error)
 	RemoveServer(ctx context.Context, in *RemoveServerRequest, opts ...grpc.CallOption) (*RemoveServerResponse, error)
 	GetClusterStatus(ctx context.Context, in *GetClusterStatusRequest, opts ...grpc.CallOption) (*GetClusterStatusResponse, error)
+	SetDecayPolicy(ctx context.Context, in *SetDecayPolicyRequest, opts ...grpc.CallOption) (*SetDecayPolicyResponse, error)
+	GetDecayPolicy(ctx context.Context, in *GetDecayPolicyRequest, opts ...grpc.CallOption) (*GetDecayPolicyResponse, error)
 }
 
 type adminServiceClient struct {
@@ -325,6 +367,26 @@ func (c *adminServiceClient) GetClusterStatus(ctx context.Context, in *GetCluste
 	return out, nil
 }
 
+func (c *adminServiceClient) SetDecayPolicy(ctx context.Context, in *SetDecayPolicyRequest, opts ...grpc.CallOption) (*SetDecayPolicyResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SetDecayPolicyResponse)
+	err := c.cc.Invoke(ctx, AdminService_SetDecayPolicy_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *adminServiceClient) GetDecayPolicy(ctx context.Context, in *GetDecayPolicyRequest, opts ...grpc.CallOption) (*GetDecayPolicyResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetDecayPolicyResponse)
+	err := c.cc.Invoke(ctx, AdminService_GetDecayPolicy_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // AdminServiceServer is the server API for AdminService service.
 // All implementations must embed UnimplementedAdminServiceServer
 // for forward compatibility.
@@ -332,6 +394,8 @@ type AdminServiceServer interface {
 	AddVoter(context.Context, *AddVoterRequest) (*AddVoterResponse, error)
 	RemoveServer(context.Context, *RemoveServerRequest) (*RemoveServerResponse, error)
 	GetClusterStatus(context.Context, *GetClusterStatusRequest) (*GetClusterStatusResponse, error)
+	SetDecayPolicy(context.Context, *SetDecayPolicyRequest) (*SetDecayPolicyResponse, error)
+	GetDecayPolicy(context.Context, *GetDecayPolicyRequest) (*GetDecayPolicyResponse, error)
 	mustEmbedUnimplementedAdminServiceServer()
 }
 
@@ -350,6 +414,12 @@ func (UnimplementedAdminServiceServer) RemoveServer(context.Context, *RemoveServ
 }
 func (UnimplementedAdminServiceServer) GetClusterStatus(context.Context, *GetClusterStatusRequest) (*GetClusterStatusResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetClusterStatus not implemented")
+}
+func (UnimplementedAdminServiceServer) SetDecayPolicy(context.Context, *SetDecayPolicyRequest) (*SetDecayPolicyResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SetDecayPolicy not implemented")
+}
+func (UnimplementedAdminServiceServer) GetDecayPolicy(context.Context, *GetDecayPolicyRequest) (*GetDecayPolicyResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetDecayPolicy not implemented")
 }
 func (UnimplementedAdminServiceServer) mustEmbedUnimplementedAdminServiceServer() {}
 func (UnimplementedAdminServiceServer) testEmbeddedByValue()                      {}
@@ -426,6 +496,42 @@ func _AdminService_GetClusterStatus_Handler(srv interface{}, ctx context.Context
 	return interceptor(ctx, in, info, handler)
 }
 
+func _AdminService_SetDecayPolicy_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetDecayPolicyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AdminServiceServer).SetDecayPolicy(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AdminService_SetDecayPolicy_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AdminServiceServer).SetDecayPolicy(ctx, req.(*SetDecayPolicyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AdminService_GetDecayPolicy_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetDecayPolicyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AdminServiceServer).GetDecayPolicy(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AdminService_GetDecayPolicy_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AdminServiceServer).GetDecayPolicy(ctx, req.(*GetDecayPolicyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // AdminService_ServiceDesc is the grpc.ServiceDesc for AdminService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -444,6 +550,14 @@ var AdminService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetClusterStatus",
 			Handler:    _AdminService_GetClusterStatus_Handler,
+		},
+		{
+			MethodName: "SetDecayPolicy",
+			Handler:    _AdminService_SetDecayPolicy_Handler,
+		},
+		{
+			MethodName: "GetDecayPolicy",
+			Handler:    _AdminService_GetDecayPolicy_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

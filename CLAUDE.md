@@ -44,19 +44,52 @@ in-memory `AccessTracker` and are flushed through Raft by `TouchFlusher`.
 If `client_id` is empty, dedup is skipped (fire-and-forget mode). The smart
 client always sets `client_id` and `seq`.
 
+### Embedding never in Apply
+The `Embedder` (Ollama HTTP call) must never be invoked inside `store.Apply`.
+Embeddings are computed asynchronously by the `EmbeddingWorker` (a
+LeaderService) and proposed as `SetEmbeddingCommand` through Raft. The
+version guard (`expected_version`) prevents stale embeddings.
+
+### HNSW is a projection
+The HNSW index is not replicated through Raft. It is a per-node projection
+of Pebble state, rebuilt on startup and after snapshot restore. Losing the
+index is safe — it can always be rebuilt from `ScanAllRecords`.
+
+### Decay uses node clock
+Decay scores are computed at read time using the node's local clock, not
+inside Apply. The `DecayPolicy` itself is replicated through Raft (stored
+under system key `\xFF\x01decay\x00<namespace>`).
+
+### Evictor uses conditional deletes
+The decay `Evictor` passes `expected_version` when deleting low-score records.
+If a record was updated between score computation and delete proposal, the
+delete is rejected. This prevents the evictor from deleting freshly-updated
+records.
+
+### applyCh is non-blocking
+The FSM sends `ApplyEvent` on a buffered channel (cap 4096) using a
+non-blocking send. If the consumer falls behind, events are dropped — the
+consumer catches up via Pebble scan on the next index rebuild cycle. Never
+make the FSM block on this channel.
+
 ## Package Layout
 
 ```
 internal/store/       Pebble state machine (Apply, Get, List)
 internal/raft/        Raft node, FSM, snapshots, dedup, leader monitor
 internal/api/         gRPC servers (MemoryService, AdminService)
-internal/decay/       TTL sweeper + access touch flusher
+internal/decay/       TTL sweeper, access touch flusher, decay scoring, evictor
+internal/embedding/   Embedder interface, Ollama client, async worker
+internal/index/       HNSW semantic index, FSM event consumer
+internal/bench/       Open-loop benchmark engine with HDR histograms
 internal/client/      Smart gRPC client with redirect + session + dedup
 internal/metrics/     Prometheus metric definitions
 internal/clock/       Clock interface for testing
 cmd/engramd/          Server binary
 cmd/engramctl/        CLI + MCP server
 proto/                Protobuf definitions
-test/                 Cluster integration tests
+test/                 Cluster integration + chaos tests (toxiproxy)
+tools/                Benchmark chart generation (plot_bench.py)
+docs/                 DESIGN.md, BENCHMARKS.md
 deploy/               Dockerfile, docker-compose, Prometheus config
 ```

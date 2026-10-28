@@ -13,6 +13,26 @@ var SystemKeyPrefix = []byte{0xFF}
 // Layout: 0xFF 0x00 "dedup" 0x00 <client_id>
 var DedupKeyPrefix = []byte{0xFF, 0x00, 'd', 'e', 'd', 'u', 'p', 0x00}
 
+// DecayPolicyKeyPrefix is the prefix for decay policy entries.
+// Layout: 0xFF 0x01 "decay" 0x00 <namespace>
+var DecayPolicyKeyPrefix = []byte{0xFF, 0x01, 'd', 'e', 'c', 'a', 'y', 0x00}
+
+// EncodeDecayPolicyKey returns the Pebble key for a decay policy entry.
+func EncodeDecayPolicyKey(namespace string) []byte {
+	buf := make([]byte, len(DecayPolicyKeyPrefix)+len(namespace))
+	copy(buf, DecayPolicyKeyPrefix)
+	copy(buf[len(DecayPolicyKeyPrefix):], namespace)
+	return buf
+}
+
+// DecodeDecayPolicyKey extracts the namespace from a decay policy key. Returns "" if invalid.
+func DecodeDecayPolicyKey(raw []byte) string {
+	if !bytes.HasPrefix(raw, DecayPolicyKeyPrefix) {
+		return ""
+	}
+	return string(raw[len(DecayPolicyKeyPrefix):])
+}
+
 // EncodeDedupKey returns the Pebble key for a dedup entry.
 func EncodeDedupKey(clientID string) []byte {
 	buf := make([]byte, len(DedupKeyPrefix)+len(clientID))

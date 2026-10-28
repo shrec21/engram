@@ -54,7 +54,7 @@ func setup(t *testing.T) *testEnv {
 	tracker := store.NewAccessTracker()
 
 	grpcSrv := grpc.NewServer()
-	pb.RegisterMemoryServiceServer(grpcSrv, NewServer(proposer, s, nil, clk, tracker))
+	pb.RegisterMemoryServiceServer(grpcSrv, NewServer(proposer, s, nil, clk, tracker, nil, nil))
 
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)

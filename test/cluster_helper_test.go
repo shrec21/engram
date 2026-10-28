@@ -94,9 +94,9 @@ func newTestCluster(t *testing.T, n int) *testCluster {
 
 		grpcSrv := grpc.NewServer()
 		pb.RegisterMemoryServiceServer(grpcSrv,
-			api.NewServer(raftNode, s, raftNode, clk, tracker))
+			api.NewServer(raftNode, s, raftNode, clk, tracker, nil, nil))
 		pb.RegisterAdminServiceServer(grpcSrv,
-			api.NewAdminServer(raftNode))
+			api.NewAdminServer(raftNode, raftNode, s))
 
 		// Start gRPC.
 		go grpcSrv.Serve(infos[i].grpcLis)

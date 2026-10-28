@@ -21,6 +21,10 @@ message MemoryRecord {
   google.protobuf.Timestamp expires_at = 10;
   google.protobuf.Timestamp last_accessed_at = 11;
   uint64 access_count = 12;
+  repeated float embedding = 13;        // float32 vector
+  string embedding_model = 14;          // e.g. "nomic-embed-text"
+  uint64 embedded_version = 15;         // version when embedding was computed
+  bool pinned = 16;                     // exempt from decay eviction
 }
 
 // ── Consistency Levels ──
@@ -44,6 +48,8 @@ message Command {
     CompareAndSetCommand compare_and_set = 3;
     DeleteCommand delete = 4;
     TouchCommand touch = 7;  // batched access metadata
+    SetEmbeddingCommand set_embedding = 8;
+    SetDecayPolicyCommand set_decay_policy = 9;
   }
 }
 
@@ -55,6 +61,7 @@ message PutCommand {
   string source = 5;
   float confidence = 6;
   google.protobuf.Timestamp expires_at = 7;
+  bool pinned = 8;
 }
 
 message CompareAndSetCommand {
@@ -66,6 +73,7 @@ message CompareAndSetCommand {
   string source = 6;
   float confidence = 7;
   google.protobuf.Timestamp expires_at = 8;
+  bool pinned = 9;
 }
 
 message DeleteCommand {
@@ -85,6 +93,25 @@ message TouchEntry {
   uint64 access_count_delta = 4;
 }
 
+message SetEmbeddingCommand {
+  string namespace = 1;
+  string key = 2;
+  uint64 expected_version = 3;
+  repeated float embedding = 4;
+  string embedding_model = 5;
+}
+
+message SetDecayPolicyCommand {
+  string namespace = 1;
+  DecayPolicy policy = 2;
+}
+
+message DecayPolicy {
+  double half_life_seconds = 1;
+  double access_weight = 2;
+  double min_score = 3;
+}
+
 // Apply returns this. Not in the Raft log, just the response.
 message CommandResult {
   oneof result {
@@ -92,6 +119,8 @@ message CommandResult {
     DeleteResult delete_result = 2;
     CASConflict cas_conflict = 3;
     TouchResult touch_result = 4;
+    SetEmbeddingResult set_embedding_result = 5;
+    SetDecayPolicyResult set_decay_policy_result = 6;
   }
 }
 
@@ -107,6 +136,12 @@ message CASConflict {
 
 message TouchResult {}
 
+message SetEmbeddingResult {
+  bool applied = 1;
+}
+
+message SetDecayPolicyResult {}
+
 // ── gRPC Service ──
 
 message PutRequest {
@@ -119,6 +154,7 @@ message PutRequest {
   google.protobuf.Timestamp expires_at = 7;
   string client_id = 8;
   uint64 seq = 9;
+  bool pinned = 10;
 }
 
 message PutResponse {
@@ -149,6 +185,7 @@ message CompareAndSetRequest {
   google.protobuf.Timestamp expires_at = 8;
   string client_id = 9;
   uint64 seq = 10;
+  bool pinned = 11;
 }
 
 message CompareAndSetResponse {
@@ -189,12 +226,42 @@ message NotLeaderDetail {
   string leader_id = 2;
 }
 
+// ── Search ──
+
+message SearchRequest {
+  string namespace = 1;
+  string query_text = 2;
+  repeated float query_vector = 3;
+  int32 k = 4;
+  ConsistencyLevel consistency = 5;
+  uint64 applied_index = 6;
+  string key_prefix = 7;
+  string created_by = 8;
+  float min_confidence = 9;
+  google.protobuf.Timestamp updated_after = 10;
+  float similarity_weight = 11;  // alpha for sim vs decay blend, default 0.7
+}
+
+message SearchResult {
+  MemoryRecord record = 1;
+  float score = 2;
+  float similarity = 3;
+  float decay_score = 4;
+  bool embedding_current = 5;
+}
+
+message SearchResponse {
+  repeated SearchResult results = 1;
+  uint64 applied_index = 2;
+}
+
 service MemoryService {
   rpc Put(PutRequest) returns (PutResponse);
   rpc Get(GetRequest) returns (GetResponse);
   rpc CompareAndSet(CompareAndSetRequest) returns (CompareAndSetResponse);
   rpc Delete(DeleteRequest) returns (DeleteResponse);
   rpc List(ListRequest) returns (ListResponse);
+  rpc Search(SearchRequest) returns (SearchResponse);
 }
 
 // ── Admin Service ──
@@ -203,6 +270,8 @@ service AdminService {
   rpc AddVoter(AddVoterRequest) returns (AddVoterResponse);
   rpc RemoveServer(RemoveServerRequest) returns (RemoveServerResponse);
   rpc GetClusterStatus(GetClusterStatusRequest) returns (GetClusterStatusResponse);
+  rpc SetDecayPolicy(SetDecayPolicyRequest) returns (SetDecayPolicyResponse);
+  rpc GetDecayPolicy(GetDecayPolicyRequest) returns (GetDecayPolicyResponse);
 }
 
 message AddVoterRequest {
@@ -233,4 +302,23 @@ message ServerInfo {
   string id = 1;
   string address = 2;
   string suffrage = 3;
+}
+
+message SetDecayPolicyRequest {
+  string namespace = 1;
+  DecayPolicy policy = 2;
+  string client_id = 3;
+  uint64 seq = 4;
+}
+
+message SetDecayPolicyResponse {
+  uint64 applied_index = 1;
+}
+
+message GetDecayPolicyRequest {
+  string namespace = 1;
+}
+
+message GetDecayPolicyResponse {
+  DecayPolicy policy = 1;
 }

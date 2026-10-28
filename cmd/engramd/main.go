@@ -16,6 +16,8 @@ import (
 	"github.com/shrec21/engram/internal/api"
 	"github.com/shrec21/engram/internal/clock"
 	"github.com/shrec21/engram/internal/decay"
+	"github.com/shrec21/engram/internal/embedding"
+	"github.com/shrec21/engram/internal/index"
 	_ "github.com/shrec21/engram/internal/metrics" // register metrics
 	engramraft "github.com/shrec21/engram/internal/raft"
 	"github.com/shrec21/engram/internal/store"
@@ -39,6 +41,15 @@ func main() {
 	bootstrap := flag.Bool("bootstrap", false, "bootstrap a new cluster")
 	peers := flag.String("peers", "", "initial peers: id1=raft:grpc,id2=raft:grpc,...")
 
+	// Embedding flags.
+	embeddingModel := flag.String("embedding-model", "", "embedding model name (empty to disable)")
+	ollamaURL := flag.String("ollama-url", "http://localhost:11434", "Ollama server URL")
+	embeddingDim := flag.Int("embedding-dim", 768, "embedding vector dimension")
+	embeddingBatch := flag.Int("embedding-batch", 32, "embedding batch size")
+
+	// Eviction flags.
+	evictInterval := flag.Duration("evict-interval", 5*time.Minute, "decay eviction interval")
+
 	flag.Parse()
 
 	clk := clock.RealClock{}
@@ -50,6 +61,22 @@ func main() {
 	defer s.Close()
 
 	tracker := store.NewAccessTracker()
+
+	// Create apply event channel for HNSW consumer.
+	applyCh := make(chan engramraft.ApplyEvent, 4096)
+
+	// Create HNSW semantic index (runs on all nodes).
+	semanticIndex := index.NewSemanticIndex(*embeddingDim)
+
+	// Create embedder if configured.
+	var embedder embedding.Embedder
+	if *embeddingModel != "" {
+		embedder = embedding.NewOllamaEmbedder(*ollamaURL, *embeddingModel, *embeddingDim)
+		log.Printf("embedding enabled: model=%s, dim=%d, batch=%d", *embeddingModel, *embeddingDim, *embeddingBatch)
+	}
+
+	// Create a searcher adapter from the index.
+	searcher := &indexSearcherAdapter{idx: semanticIndex}
 
 	var (
 		proposer    api.Proposer
@@ -72,6 +99,7 @@ func main() {
 			DataDir:   *dataDir,
 			Bootstrap: *bootstrap,
 			Peers:     parsedPeers,
+			ApplyCh:   applyCh,
 		}, s)
 		if err != nil {
 			log.Fatalf("start raft: %v", err)
@@ -84,7 +112,16 @@ func main() {
 		// Leader-only services.
 		sweeper := decay.NewSweeper(s, raftNode, clk, *sweepInterval)
 		touchFlusher := decay.NewTouchFlusher(tracker, raftNode, *touchInterval)
-		monitor := engramraft.NewLeaderMonitor(raftNode.LeaderCh(), sweeper, touchFlusher)
+		evictor := decay.NewEvictor(s, s, raftNode, clk, *evictInterval)
+
+		services := []engramraft.LeaderService{sweeper, touchFlusher, evictor}
+
+		if embedder != nil {
+			embWorker := embedding.NewEmbeddingWorker(s, embedder, raftNode, *embeddingBatch, 5*time.Second)
+			services = append(services, embWorker)
+		}
+
+		monitor := engramraft.NewLeaderMonitor(raftNode.LeaderCh(), services...)
 		go monitor.Run()
 		defer monitor.Stop()
 	} else {
@@ -98,12 +135,27 @@ func main() {
 		touchFlusher := decay.NewTouchFlusher(tracker, proposer, *touchInterval)
 		touchFlusher.Start()
 		defer touchFlusher.Stop()
+
+		evictor := decay.NewEvictor(s, s, proposer, clk, *evictInterval)
+		evictor.Start()
+		defer evictor.Stop()
+
+		if embedder != nil {
+			embWorker := embedding.NewEmbeddingWorker(s, embedder, proposer, *embeddingBatch, 5*time.Second)
+			embWorker.Start()
+			defer embWorker.Stop()
+		}
 	}
 
+	// Start HNSW consumer (runs on all nodes).
+	consumer := index.NewConsumer(semanticIndex, s, applyCh)
+	consumer.Start()
+	defer consumer.Stop()
+
 	srv := grpc.NewServer()
-	pb.RegisterMemoryServiceServer(srv, api.NewServer(proposer, s, clusterInfo, clk, tracker))
+	pb.RegisterMemoryServiceServer(srv, api.NewServer(proposer, s, clusterInfo, clk, tracker, searcher, embedder))
 	if raftNode != nil {
-		pb.RegisterAdminServiceServer(srv, api.NewAdminServer(raftNode))
+		pb.RegisterAdminServiceServer(srv, api.NewAdminServer(raftNode, raftNode, s))
 	}
 
 	// Start metrics HTTP server.
@@ -145,6 +197,24 @@ type localProposer struct {
 func (p *localProposer) Propose(_ context.Context, cmd *pb.Command) (*pb.CommandResult, uint64, error) {
 	result, err := p.store.Apply(cmd)
 	return result, 0, err
+}
+
+// indexSearcherAdapter adapts index.SemanticIndex to api.SemanticSearcher.
+type indexSearcherAdapter struct {
+	idx *index.SemanticIndex
+}
+
+func (a *indexSearcherAdapter) Search(namespace string, query []float32, k int) []api.SearchHit {
+	hits := a.idx.Search(namespace, query, k)
+	result := make([]api.SearchHit, len(hits))
+	for i, h := range hits {
+		result[i] = api.SearchHit{
+			Namespace:  h.Namespace,
+			Key:        h.Key,
+			Similarity: h.Similarity,
+		}
+	}
+	return result
 }
 
 // parsePeers parses "id1=raftAddr:grpcAddr,id2=raftAddr:grpcAddr"

@@ -26,6 +26,7 @@ func NewServer(client pb.MemoryServiceClient) *mcpserver.MCPServer {
 	s.AddTool(memoryCasTool(), h.handleCAS)
 	s.AddTool(memoryDeleteTool(), h.handleDelete)
 	s.AddTool(memoryListTool(), h.handleList)
+	s.AddTool(memorySearchTool(), h.handleSearch)
 
 	return s
 }
@@ -86,6 +87,18 @@ func memoryListTool() mcp.Tool {
 		mcp.WithString("namespace", mcp.Description("Namespace"), mcp.Required()),
 		mcp.WithString("key_prefix", mcp.Description("Filter by key prefix")),
 		mcp.WithNumber("limit", mcp.Description("Max records to return")),
+	)
+}
+
+func memorySearchTool() mcp.Tool {
+	return mcp.NewTool("memory_search",
+		mcp.WithDescription("Search memory records by semantic similarity. Provide query_text for natural language search."),
+		mcp.WithString("namespace", mcp.Description("Namespace"), mcp.Required()),
+		mcp.WithString("query_text", mcp.Description("Natural language query")),
+		mcp.WithNumber("k", mcp.Description("Number of results to return (default 10)")),
+		mcp.WithString("key_prefix", mcp.Description("Filter by key prefix")),
+		mcp.WithString("created_by", mcp.Description("Filter by creator")),
+		mcp.WithNumber("min_confidence", mcp.Description("Minimum confidence threshold")),
 	)
 }
 
@@ -159,6 +172,29 @@ func (h *handler) handleDelete(ctx context.Context, req mcp.CallToolRequest) (*m
 		return mcp.NewToolResultError(status.Convert(err).Message()), nil
 	}
 	return jsonResult(map[string]string{"status": "deleted"})
+}
+
+func (h *handler) handleSearch(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	args := req.GetArguments()
+	k := int32(argFloat(args, "k"))
+	if k <= 0 {
+		k = 10
+	}
+
+	searchReq := &pb.SearchRequest{
+		Namespace:     argString(args, "namespace"),
+		QueryText:     argString(args, "query_text"),
+		K:             k,
+		KeyPrefix:     argString(args, "key_prefix"),
+		CreatedBy:     argString(args, "created_by"),
+		MinConfidence: float32(argFloat(args, "min_confidence")),
+	}
+
+	resp, err := h.client.Search(ctx, searchReq)
+	if err != nil {
+		return mcp.NewToolResultError(status.Convert(err).Message()), nil
+	}
+	return jsonResult(resp.Results)
 }
 
 func (h *handler) handleList(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
