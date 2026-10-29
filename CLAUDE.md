@@ -1,5 +1,17 @@
 # Engram — Project Guide
 
+## Commit Discipline
+
+- Commit after every small, single logical change (one new proto message, one
+  function plus its test, one config change, one doc section).
+- Never batch unrelated changes into one commit. If a diff touches unrelated
+  things, split it.
+- Run `go build ./...` and the relevant tests before each commit. Never commit
+  code that does not compile.
+- Use Conventional Commits: `feat(shard):`, `fix(raft):`, `test(chaos):`,
+  `docs(design):`, `refactor(store):`, `chore(ci):`.
+- Messages say WHAT changed and WHY in the subject, details in the body if needed.
+
 ## Build & Test
 
 ```bash
