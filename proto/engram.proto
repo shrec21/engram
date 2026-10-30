@@ -35,6 +35,20 @@ enum ConsistencyLevel {
   CONSISTENCY_STALE = 2;         // read local state immediately
 }
 
+// ── Auth ──
+
+enum Permission {
+  READ = 0;
+  WRITE = 1;
+  ADMIN = 2;
+}
+
+message AccessToken {
+  string token_hash = 1;                    // SHA-256 hex
+  repeated string namespace_prefixes = 2;   // allowed namespace prefixes
+  repeated Permission permissions = 3;
+}
+
 // ── Deterministic Apply Interface ──
 // Command is serialized into the Raft log.
 // Timestamps are assigned BEFORE Apply and carried in the command.
@@ -50,6 +64,9 @@ message Command {
     TouchCommand touch = 7;  // batched access metadata
     SetEmbeddingCommand set_embedding = 8;
     SetDecayPolicyCommand set_decay_policy = 9;
+    UpdateShardMapCommand update_shard_map = 10;
+    SetTokenCommand set_token = 11;
+    RevokeTokenCommand revoke_token = 12;
   }
 }
 
@@ -112,6 +129,18 @@ message DecayPolicy {
   double min_score = 3;
 }
 
+message UpdateShardMapCommand {
+  ShardMap shard_map = 1;
+}
+
+message SetTokenCommand {
+  AccessToken token = 1;
+}
+
+message RevokeTokenCommand {
+  string token_hash = 1;
+}
+
 // Apply returns this. Not in the Raft log, just the response.
 message CommandResult {
   oneof result {
@@ -121,6 +150,9 @@ message CommandResult {
     TouchResult touch_result = 4;
     SetEmbeddingResult set_embedding_result = 5;
     SetDecayPolicyResult set_decay_policy_result = 6;
+    UpdateShardMapResult update_shard_map_result = 7;
+    SetTokenResult set_token_result = 8;
+    RevokeTokenResult revoke_token_result = 9;
   }
 }
 
@@ -141,6 +173,12 @@ message SetEmbeddingResult {
 }
 
 message SetDecayPolicyResult {}
+
+message UpdateShardMapResult {}
+
+message SetTokenResult {}
+
+message RevokeTokenResult {}
 
 // ── gRPC Service ──
 
@@ -303,6 +341,9 @@ service AdminService {
   rpc SetDecayPolicy(SetDecayPolicyRequest) returns (SetDecayPolicyResponse);
   rpc GetDecayPolicy(GetDecayPolicyRequest) returns (GetDecayPolicyResponse);
   rpc GetShardMap(GetShardMapRequest) returns (GetShardMapResponse);
+  rpc TransferLeadership(TransferLeadershipRequest) returns (TransferLeadershipResponse);
+  rpc SetToken(SetTokenRequest) returns (SetTokenResponse);
+  rpc RevokeToken(RevokeTokenRequest) returns (RevokeTokenResponse);
 }
 
 message AddVoterRequest {
@@ -358,4 +399,31 @@ message GetShardMapRequest {}
 
 message GetShardMapResponse {
   ShardMap shard_map = 1;
+}
+
+message TransferLeadershipRequest {
+  uint32 shard_id = 1;
+  string target_server_id = 2;
+}
+
+message TransferLeadershipResponse {}
+
+message SetTokenRequest {
+  AccessToken token = 1;
+  string client_id = 2;
+  uint64 seq = 3;
+}
+
+message SetTokenResponse {
+  uint64 applied_index = 1;
+}
+
+message RevokeTokenRequest {
+  string token_hash = 1;
+  string client_id = 2;
+  uint64 seq = 3;
+}
+
+message RevokeTokenResponse {
+  uint64 applied_index = 1;
 }

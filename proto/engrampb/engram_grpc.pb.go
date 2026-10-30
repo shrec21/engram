@@ -311,12 +311,15 @@ var MemoryService_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
-	AdminService_AddVoter_FullMethodName         = "/engram.v1.AdminService/AddVoter"
-	AdminService_RemoveServer_FullMethodName     = "/engram.v1.AdminService/RemoveServer"
-	AdminService_GetClusterStatus_FullMethodName = "/engram.v1.AdminService/GetClusterStatus"
-	AdminService_SetDecayPolicy_FullMethodName   = "/engram.v1.AdminService/SetDecayPolicy"
-	AdminService_GetDecayPolicy_FullMethodName   = "/engram.v1.AdminService/GetDecayPolicy"
-	AdminService_GetShardMap_FullMethodName      = "/engram.v1.AdminService/GetShardMap"
+	AdminService_AddVoter_FullMethodName           = "/engram.v1.AdminService/AddVoter"
+	AdminService_RemoveServer_FullMethodName       = "/engram.v1.AdminService/RemoveServer"
+	AdminService_GetClusterStatus_FullMethodName   = "/engram.v1.AdminService/GetClusterStatus"
+	AdminService_SetDecayPolicy_FullMethodName     = "/engram.v1.AdminService/SetDecayPolicy"
+	AdminService_GetDecayPolicy_FullMethodName     = "/engram.v1.AdminService/GetDecayPolicy"
+	AdminService_GetShardMap_FullMethodName        = "/engram.v1.AdminService/GetShardMap"
+	AdminService_TransferLeadership_FullMethodName = "/engram.v1.AdminService/TransferLeadership"
+	AdminService_SetToken_FullMethodName           = "/engram.v1.AdminService/SetToken"
+	AdminService_RevokeToken_FullMethodName        = "/engram.v1.AdminService/RevokeToken"
 )
 
 // AdminServiceClient is the client API for AdminService service.
@@ -329,6 +332,9 @@ type AdminServiceClient interface {
 	SetDecayPolicy(ctx context.Context, in *SetDecayPolicyRequest, opts ...grpc.CallOption) (*SetDecayPolicyResponse, error)
 	GetDecayPolicy(ctx context.Context, in *GetDecayPolicyRequest, opts ...grpc.CallOption) (*GetDecayPolicyResponse, error)
 	GetShardMap(ctx context.Context, in *GetShardMapRequest, opts ...grpc.CallOption) (*GetShardMapResponse, error)
+	TransferLeadership(ctx context.Context, in *TransferLeadershipRequest, opts ...grpc.CallOption) (*TransferLeadershipResponse, error)
+	SetToken(ctx context.Context, in *SetTokenRequest, opts ...grpc.CallOption) (*SetTokenResponse, error)
+	RevokeToken(ctx context.Context, in *RevokeTokenRequest, opts ...grpc.CallOption) (*RevokeTokenResponse, error)
 }
 
 type adminServiceClient struct {
@@ -399,6 +405,36 @@ func (c *adminServiceClient) GetShardMap(ctx context.Context, in *GetShardMapReq
 	return out, nil
 }
 
+func (c *adminServiceClient) TransferLeadership(ctx context.Context, in *TransferLeadershipRequest, opts ...grpc.CallOption) (*TransferLeadershipResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(TransferLeadershipResponse)
+	err := c.cc.Invoke(ctx, AdminService_TransferLeadership_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *adminServiceClient) SetToken(ctx context.Context, in *SetTokenRequest, opts ...grpc.CallOption) (*SetTokenResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SetTokenResponse)
+	err := c.cc.Invoke(ctx, AdminService_SetToken_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *adminServiceClient) RevokeToken(ctx context.Context, in *RevokeTokenRequest, opts ...grpc.CallOption) (*RevokeTokenResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RevokeTokenResponse)
+	err := c.cc.Invoke(ctx, AdminService_RevokeToken_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // AdminServiceServer is the server API for AdminService service.
 // All implementations must embed UnimplementedAdminServiceServer
 // for forward compatibility.
@@ -409,6 +445,9 @@ type AdminServiceServer interface {
 	SetDecayPolicy(context.Context, *SetDecayPolicyRequest) (*SetDecayPolicyResponse, error)
 	GetDecayPolicy(context.Context, *GetDecayPolicyRequest) (*GetDecayPolicyResponse, error)
 	GetShardMap(context.Context, *GetShardMapRequest) (*GetShardMapResponse, error)
+	TransferLeadership(context.Context, *TransferLeadershipRequest) (*TransferLeadershipResponse, error)
+	SetToken(context.Context, *SetTokenRequest) (*SetTokenResponse, error)
+	RevokeToken(context.Context, *RevokeTokenRequest) (*RevokeTokenResponse, error)
 	mustEmbedUnimplementedAdminServiceServer()
 }
 
@@ -436,6 +475,15 @@ func (UnimplementedAdminServiceServer) GetDecayPolicy(context.Context, *GetDecay
 }
 func (UnimplementedAdminServiceServer) GetShardMap(context.Context, *GetShardMapRequest) (*GetShardMapResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetShardMap not implemented")
+}
+func (UnimplementedAdminServiceServer) TransferLeadership(context.Context, *TransferLeadershipRequest) (*TransferLeadershipResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method TransferLeadership not implemented")
+}
+func (UnimplementedAdminServiceServer) SetToken(context.Context, *SetTokenRequest) (*SetTokenResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SetToken not implemented")
+}
+func (UnimplementedAdminServiceServer) RevokeToken(context.Context, *RevokeTokenRequest) (*RevokeTokenResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RevokeToken not implemented")
 }
 func (UnimplementedAdminServiceServer) mustEmbedUnimplementedAdminServiceServer() {}
 func (UnimplementedAdminServiceServer) testEmbeddedByValue()                      {}
@@ -566,6 +614,60 @@ func _AdminService_GetShardMap_Handler(srv interface{}, ctx context.Context, dec
 	return interceptor(ctx, in, info, handler)
 }
 
+func _AdminService_TransferLeadership_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(TransferLeadershipRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AdminServiceServer).TransferLeadership(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AdminService_TransferLeadership_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AdminServiceServer).TransferLeadership(ctx, req.(*TransferLeadershipRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AdminService_SetToken_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetTokenRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AdminServiceServer).SetToken(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AdminService_SetToken_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AdminServiceServer).SetToken(ctx, req.(*SetTokenRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AdminService_RevokeToken_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RevokeTokenRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AdminServiceServer).RevokeToken(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AdminService_RevokeToken_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AdminServiceServer).RevokeToken(ctx, req.(*RevokeTokenRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // AdminService_ServiceDesc is the grpc.ServiceDesc for AdminService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -596,6 +698,18 @@ var AdminService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetShardMap",
 			Handler:    _AdminService_GetShardMap_Handler,
+		},
+		{
+			MethodName: "TransferLeadership",
+			Handler:    _AdminService_TransferLeadership_Handler,
+		},
+		{
+			MethodName: "SetToken",
+			Handler:    _AdminService_SetToken_Handler,
+		},
+		{
+			MethodName: "RevokeToken",
+			Handler:    _AdminService_RevokeToken_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
