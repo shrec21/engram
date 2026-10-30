@@ -279,6 +279,21 @@ service MemoryService {
   rpc Search(SearchRequest) returns (SearchResponse);
 }
 
+// ── Shard Map ──
+
+message ShardInfo {
+  uint32 shard_id = 1;
+  repeated string replica_node_ids = 2;
+  string leader_id = 3;
+  string leader_grpc_addr = 4;
+}
+
+message ShardMap {
+  uint64 version = 1;
+  uint32 num_shards = 2;
+  repeated ShardInfo shards = 3;
+}
+
 // ── Admin Service ──
 
 service AdminService {
@@ -287,6 +302,7 @@ service AdminService {
   rpc GetClusterStatus(GetClusterStatusRequest) returns (GetClusterStatusResponse);
   rpc SetDecayPolicy(SetDecayPolicyRequest) returns (SetDecayPolicyResponse);
   rpc GetDecayPolicy(GetDecayPolicyRequest) returns (GetDecayPolicyResponse);
+  rpc GetShardMap(GetShardMapRequest) returns (GetShardMapResponse);
 }
 
 message AddVoterRequest {
@@ -336,4 +352,10 @@ message GetDecayPolicyRequest {
 
 message GetDecayPolicyResponse {
   DecayPolicy policy = 1;
+}
+
+message GetShardMapRequest {}
+
+message GetShardMapResponse {
+  ShardMap shard_map = 1;
 }

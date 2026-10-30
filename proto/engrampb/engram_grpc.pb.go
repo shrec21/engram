@@ -316,6 +316,7 @@ const (
 	AdminService_GetClusterStatus_FullMethodName = "/engram.v1.AdminService/GetClusterStatus"
 	AdminService_SetDecayPolicy_FullMethodName   = "/engram.v1.AdminService/SetDecayPolicy"
 	AdminService_GetDecayPolicy_FullMethodName   = "/engram.v1.AdminService/GetDecayPolicy"
+	AdminService_GetShardMap_FullMethodName      = "/engram.v1.AdminService/GetShardMap"
 )
 
 // AdminServiceClient is the client API for AdminService service.
@@ -327,6 +328,7 @@ type AdminServiceClient interface {
 	GetClusterStatus(ctx context.Context, in *GetClusterStatusRequest, opts ...grpc.CallOption) (*GetClusterStatusResponse, error)
 	SetDecayPolicy(ctx context.Context, in *SetDecayPolicyRequest, opts ...grpc.CallOption) (*SetDecayPolicyResponse, error)
 	GetDecayPolicy(ctx context.Context, in *GetDecayPolicyRequest, opts ...grpc.CallOption) (*GetDecayPolicyResponse, error)
+	GetShardMap(ctx context.Context, in *GetShardMapRequest, opts ...grpc.CallOption) (*GetShardMapResponse, error)
 }
 
 type adminServiceClient struct {
@@ -387,6 +389,16 @@ func (c *adminServiceClient) GetDecayPolicy(ctx context.Context, in *GetDecayPol
 	return out, nil
 }
 
+func (c *adminServiceClient) GetShardMap(ctx context.Context, in *GetShardMapRequest, opts ...grpc.CallOption) (*GetShardMapResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetShardMapResponse)
+	err := c.cc.Invoke(ctx, AdminService_GetShardMap_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // AdminServiceServer is the server API for AdminService service.
 // All implementations must embed UnimplementedAdminServiceServer
 // for forward compatibility.
@@ -396,6 +408,7 @@ type AdminServiceServer interface {
 	GetClusterStatus(context.Context, *GetClusterStatusRequest) (*GetClusterStatusResponse, error)
 	SetDecayPolicy(context.Context, *SetDecayPolicyRequest) (*SetDecayPolicyResponse, error)
 	GetDecayPolicy(context.Context, *GetDecayPolicyRequest) (*GetDecayPolicyResponse, error)
+	GetShardMap(context.Context, *GetShardMapRequest) (*GetShardMapResponse, error)
 	mustEmbedUnimplementedAdminServiceServer()
 }
 
@@ -420,6 +433,9 @@ func (UnimplementedAdminServiceServer) SetDecayPolicy(context.Context, *SetDecay
 }
 func (UnimplementedAdminServiceServer) GetDecayPolicy(context.Context, *GetDecayPolicyRequest) (*GetDecayPolicyResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetDecayPolicy not implemented")
+}
+func (UnimplementedAdminServiceServer) GetShardMap(context.Context, *GetShardMapRequest) (*GetShardMapResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetShardMap not implemented")
 }
 func (UnimplementedAdminServiceServer) mustEmbedUnimplementedAdminServiceServer() {}
 func (UnimplementedAdminServiceServer) testEmbeddedByValue()                      {}
@@ -532,6 +548,24 @@ func _AdminService_GetDecayPolicy_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _AdminService_GetShardMap_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetShardMapRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AdminServiceServer).GetShardMap(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AdminService_GetShardMap_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AdminServiceServer).GetShardMap(ctx, req.(*GetShardMapRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // AdminService_ServiceDesc is the grpc.ServiceDesc for AdminService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -558,6 +592,10 @@ var AdminService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetDecayPolicy",
 			Handler:    _AdminService_GetDecayPolicy_Handler,
+		},
+		{
+			MethodName: "GetShardMap",
+			Handler:    _AdminService_GetShardMap_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
