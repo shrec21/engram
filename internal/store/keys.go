@@ -17,6 +17,14 @@ var DedupKeyPrefix = []byte{0xFF, 0x00, 'd', 'e', 'd', 'u', 'p', 0x00}
 // Layout: 0xFF 0x01 "decay" 0x00 <namespace>
 var DecayPolicyKeyPrefix = []byte{0xFF, 0x01, 'd', 'e', 'c', 'a', 'y', 0x00}
 
+// ShardMapKey is the fixed key for the shard map.
+// Layout: 0xFF 0x02 "shardmap"
+var ShardMapKey = []byte{0xFF, 0x02, 's', 'h', 'a', 'r', 'd', 'm', 'a', 'p'}
+
+// TokenKeyPrefix is the prefix for auth token entries.
+// Layout: 0xFF 0x03 "token" 0x00 <token_hash>
+var TokenKeyPrefix = []byte{0xFF, 0x03, 't', 'o', 'k', 'e', 'n', 0x00}
+
 // EncodeDecayPolicyKey returns the Pebble key for a decay policy entry.
 func EncodeDecayPolicyKey(namespace string) []byte {
 	buf := make([]byte, len(DecayPolicyKeyPrefix)+len(namespace))
@@ -47,6 +55,22 @@ func DecodeDedupKey(raw []byte) string {
 		return ""
 	}
 	return string(raw[len(DedupKeyPrefix):])
+}
+
+// EncodeTokenKey returns the Pebble key for an auth token entry.
+func EncodeTokenKey(tokenHash string) []byte {
+	buf := make([]byte, len(TokenKeyPrefix)+len(tokenHash))
+	copy(buf, TokenKeyPrefix)
+	copy(buf[len(TokenKeyPrefix):], tokenHash)
+	return buf
+}
+
+// DecodeTokenKey extracts the token_hash from a token key. Returns "" if invalid.
+func DecodeTokenKey(raw []byte) string {
+	if !bytes.HasPrefix(raw, TokenKeyPrefix) {
+		return ""
+	}
+	return string(raw[len(TokenKeyPrefix):])
 }
 
 // IsSystemKey returns true if the key is in the system key range.
