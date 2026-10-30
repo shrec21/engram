@@ -160,6 +160,7 @@ message PutRequest {
 message PutResponse {
   uint64 version = 1;
   uint64 applied_index = 2;
+  uint32 shard_id = 3;
 }
 
 message GetRequest {
@@ -172,6 +173,7 @@ message GetRequest {
 message GetResponse {
   MemoryRecord record = 1;
   uint64 applied_index = 2;
+  uint32 shard_id = 3;
 }
 
 message CompareAndSetRequest {
@@ -191,6 +193,7 @@ message CompareAndSetRequest {
 message CompareAndSetResponse {
   uint64 version = 1;
   uint64 applied_index = 2;
+  uint32 shard_id = 3;
 }
 
 message DeleteRequest {
@@ -203,6 +206,7 @@ message DeleteRequest {
 
 message DeleteResponse {
   uint64 applied_index = 1;
+  uint32 shard_id = 2;
 }
 
 message ListRequest {
@@ -218,12 +222,22 @@ message ListResponse {
   repeated MemoryRecord records = 1;
   string next_page_token = 2;
   uint64 applied_index = 3;
+  uint32 shard_id = 4;
 }
 
 // NOT_LEADER error detail for redirects.
 message NotLeaderDetail {
   string leader_address = 1;  // gRPC address
   string leader_id = 2;
+  uint32 shard_id = 3;
+  uint64 shard_map_version = 4;
+}
+
+// WRONG_SHARD error detail: client sent request to a node that does not
+// host this shard, or the namespace maps to a different shard.
+message WrongShardDetail {
+  uint32 shard_id = 1;              // correct shard for the namespace
+  uint64 shard_map_version = 2;     // current shard map version
 }
 
 // ── Search ──
@@ -253,6 +267,7 @@ message SearchResult {
 message SearchResponse {
   repeated SearchResult results = 1;
   uint64 applied_index = 2;
+  uint32 shard_id = 3;
 }
 
 service MemoryService {
