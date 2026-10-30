@@ -64,6 +64,12 @@ func (s *Store) Apply(cmd *pb.Command) (*pb.CommandResult, error) {
 		return s.applySetEmbedding(p.SetEmbedding)
 	case *pb.Command_SetDecayPolicy:
 		return s.applySetDecayPolicy(p.SetDecayPolicy)
+	case *pb.Command_UpdateShardMap:
+		return s.applyUpdateShardMap(p.UpdateShardMap)
+	case *pb.Command_SetToken:
+		return s.applySetToken(p.SetToken)
+	case *pb.Command_RevokeToken:
+		return s.applyRevokeToken(p.RevokeToken)
 	default:
 		return nil, fmt.Errorf("unknown command payload type: %T", cmd.Payload)
 	}
@@ -576,6 +582,128 @@ func (s *Store) ListDecayPolicies() (map[string]*pb.DecayPolicy, error) {
 		policies[ns] = &policy
 	}
 	return policies, iter.Error()
+}
+
+// applyUpdateShardMap stores the shard map under the fixed ShardMapKey.
+func (s *Store) applyUpdateShardMap(cmd *pb.UpdateShardMapCommand) (*pb.CommandResult, error) {
+	encoded, err := proto.Marshal(cmd.ShardMap)
+	if err != nil {
+		return nil, fmt.Errorf("marshal shard map: %w", err)
+	}
+
+	if err := s.db.Set(ShardMapKey, encoded, pebble.Sync); err != nil {
+		return nil, fmt.Errorf("pebble set shard map: %w", err)
+	}
+
+	return &pb.CommandResult{
+		Result: &pb.CommandResult_UpdateShardMapResult{
+			UpdateShardMapResult: &pb.UpdateShardMapResult{},
+		},
+	}, nil
+}
+
+// applySetToken stores an access token under the token key prefix.
+func (s *Store) applySetToken(cmd *pb.SetTokenCommand) (*pb.CommandResult, error) {
+	pkey := EncodeTokenKey(cmd.Token.TokenHash)
+
+	encoded, err := proto.Marshal(cmd.Token)
+	if err != nil {
+		return nil, fmt.Errorf("marshal token: %w", err)
+	}
+
+	if err := s.db.Set(pkey, encoded, pebble.Sync); err != nil {
+		return nil, fmt.Errorf("pebble set token: %w", err)
+	}
+
+	return &pb.CommandResult{
+		Result: &pb.CommandResult_SetTokenResult{
+			SetTokenResult: &pb.SetTokenResult{},
+		},
+	}, nil
+}
+
+// applyRevokeToken deletes an access token.
+func (s *Store) applyRevokeToken(cmd *pb.RevokeTokenCommand) (*pb.CommandResult, error) {
+	pkey := EncodeTokenKey(cmd.TokenHash)
+
+	if err := s.db.Delete(pkey, pebble.Sync); err != nil {
+		return nil, fmt.Errorf("pebble delete token: %w", err)
+	}
+
+	return &pb.CommandResult{
+		Result: &pb.CommandResult_RevokeTokenResult{
+			RevokeTokenResult: &pb.RevokeTokenResult{},
+		},
+	}, nil
+}
+
+// GetShardMap returns the stored shard map, or nil if none set.
+func (s *Store) GetShardMap() (*pb.ShardMap, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	data, closer, err := s.db.Get(ShardMapKey)
+	if err == pebble.ErrNotFound {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("pebble get shard map: %w", err)
+	}
+	defer closer.Close()
+
+	var sm pb.ShardMap
+	if err := proto.Unmarshal(data, &sm); err != nil {
+		return nil, fmt.Errorf("unmarshal shard map: %w", err)
+	}
+	return &sm, nil
+}
+
+// GetToken returns an access token by hash, or nil if not found.
+func (s *Store) GetToken(tokenHash string) (*pb.AccessToken, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	pkey := EncodeTokenKey(tokenHash)
+	data, closer, err := s.db.Get(pkey)
+	if err == pebble.ErrNotFound {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("pebble get token: %w", err)
+	}
+	defer closer.Close()
+
+	var token pb.AccessToken
+	if err := proto.Unmarshal(data, &token); err != nil {
+		return nil, fmt.Errorf("unmarshal token: %w", err)
+	}
+	return &token, nil
+}
+
+// ListTokens returns all access tokens.
+func (s *Store) ListTokens() ([]*pb.AccessToken, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	upper := prefixUpperBound(TokenKeyPrefix)
+	iter, err := s.db.NewIter(&pebble.IterOptions{
+		LowerBound: TokenKeyPrefix,
+		UpperBound: upper,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("new iter: %w", err)
+	}
+	defer iter.Close()
+
+	var tokens []*pb.AccessToken
+	for iter.First(); iter.Valid(); iter.Next() {
+		var token pb.AccessToken
+		if err := proto.Unmarshal(iter.Value(), &token); err != nil {
+			continue
+		}
+		tokens = append(tokens, &token)
+	}
+	return tokens, iter.Error()
 }
 
 // NeedingEmbeddingEntry identifies a record that needs embedding.
